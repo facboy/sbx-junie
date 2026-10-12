@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Host-side half of the Junie IDE relay: publishes the host's IDEs on one port.
+
+Junie inside the sandbox reaches an IDE at `127.0.0.1:<port>`, naming the port
+from a per-project instance file. A sandbox cannot dial the IDE's own port: the
+kit's egress allowlist must name a port, and the IDE plugin picks an ephemeral
+one that changes on every restart. This daemon gives every IDE the same fixed
+host port instead. The sandbox-side relay opens a loopback endpoint per IDE and
+sends a one-line preamble naming the project; the daemon resolves that project's
+current port from the host's instance files and splices the connection through.
+
+    bin/junie-ide-relayd [--port PORT] [--instances DIR]
+
+Binds `127.0.0.1` only -- the sandbox reaches it through the runtime's
+host-loopback forwarding, which the kit allowlists as `localhost:<PORT>`. The
+instance files are re-read on every connection, so an IDE that restarts on a new
+port is picked up without restarting this daemon.
+"""
+import argparse
+import hashlib
+import json
+import os
+import select
+import socket
+import sys
+import threading
+
+DEFAULT_PORT = 27183
+PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
+HEALTH_PAYLOAD = b"health"
+HEALTH_REPLY = b"JUNIE-RELAY 1 ok\n"
+MAX_PREAMBLE = 256
+IDLE_TIMEOUT = 600
+
+
+def resolve_instances(explicit):
+    if explicit:
+        return explicit
+    junie_home = os.environ.get("JUNIE_HOME") or os.path.join(os.path.expanduser("~"), ".junie")
+    return os.path.join(junie_home, "instances")
+
+
+def read_preamble(conn):
+    """Return the payload named by the connection's preamble, or None.
+
+    Read a byte at a time: the preamble ends at a newline but the bytes after it
+    are protocol payload, so a buffered reader would swallow the client's first
+    request.
+    """
+    line = b""
+    while len(line) < MAX_PREAMBLE:
+        try:
+            chunk = conn.recv(1)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        if chunk == b"\n":
+            break
+        line += chunk
+    else:
+        return None
+    if not line.startswith(PREAMBLE_PREFIX):
+        return None
+    return line[len(PREAMBLE_PREFIX):]
+
+
+def port_for_digest(instances_dir, digest):
+    """The port the instance file naming `digest` currently advertises.
+
+    The digest is `md5(project_path)`, which is also how the plugin names its
+    own instance files. Resolved per connection rather than cached so that an
+    IDE restarted on a new port needs no action inside the sandbox. When more
+    than one file names the project -- an IDE that crashed can leave its old one
+    behind -- the newest wins, since that is the one a running IDE wrote last.
+    """
+    try:
+        names = sorted(os.listdir(instances_dir))
+    except OSError:
+        return None
+    found = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            with open(path) as handle:
+                info = json.load(handle)
+            if hashlib.md5(info["project_path"].encode()).hexdigest() != digest:
+                continue
+            port = int(info["port"])
+            if not 1 <= port <= 65535:
+                continue
+            found.append((os.stat(path).st_mtime, port))
+        except Exception:
+            continue
+    if not found:
+        return None
+    return max(found)[1]
+
+
+def splice(client, upstream):
+    """Relay both directions until each has seen EOF from the other.
+
+    An EOF is propagated as a half-close rather than a teardown: a client that
+    sends a request and then shuts down its write side would otherwise have the
+    reply it is still waiting for discarded, because the read loop returned
+    before the IDE answered.
+    """
+    peers = {client: upstream, upstream: client}
+    open_directions = {client, upstream}
+    try:
+        while open_directions:
+            readable, _, _ = select.select(list(open_directions), [], [], IDLE_TIMEOUT)
+            if not readable:
+                return
+            for source in readable:
+                try:
+                    data = source.recv(65536)
+                except OSError:
+                    open_directions.discard(source)
+                    continue
+                if not data:
+                    open_directions.discard(source)
+                    try:
+                        peers[source].shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
+                peers[source].sendall(data)
+    finally:
+        for sock in peers:
+            sock.close()
+
+
+def handle(conn, instances_dir):
+    payload = read_preamble(conn)
+    if payload is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: rejected a connection with no relay preamble\n")
+        return
+    if payload == HEALTH_PAYLOAD:
+        # Lets the sandbox-side relay tell "daemon absent" from "daemon here"
+        # in one round trip, instead of inferring it from a failed relay.
+        try:
+            conn.sendall(HEALTH_REPLY)
+        except OSError:
+            pass
+        conn.close()
+        return
+    digest = payload.decode("ascii", "replace")
+    if len(digest) != 32 or not all(c in "0123456789abcdef" for c in digest):
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: rejected a preamble that is neither health nor a project digest\n")
+        return
+    port = port_for_digest(instances_dir, digest)
+    if port is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: no running IDE for digest %s\n" % digest)
+        return
+    try:
+        upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
+    except OSError as err:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: IDE %s: %s\n" % (digest, err))
+        return
+    upstream.settimeout(None)
+    conn.settimeout(None)
+    splice(conn, upstream)
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="host port to listen on (default: %(default)s)")
+    parser.add_argument("--instances", default="",
+                        help="directory holding the IDE instance files "
+                             "(default: $JUNIE_HOME/instances)")
+    args = parser.parse_args(argv)
+
+    instances_dir = resolve_instances(args.instances)
+    if not os.path.isdir(instances_dir):
+        sys.stderr.write("junie-ide-relayd: no instance directory at %s\n" % instances_dir)
+        return 1
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", args.port))
+    listener.listen(64)
+    sys.stderr.write("junie-ide-relayd: listening on 127.0.0.1:%d, instances %s\n"
+                     % (args.port, instances_dir))
+
+    while True:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            continue
+        threading.Thread(target=handle, args=(conn, instances_dir), daemon=True).start()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

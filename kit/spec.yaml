@@ -32,6 +32,14 @@ permissions:
       # install.
       - junie.jetbrains.com
       - api.jetbrains.ai
+      # Junie inside the sandbox reaches a host IDE through the
+      # `junie-ide-relayd` daemon, which rebinds every IDE onto one fixed
+      # host loopback port -- the port below. The runtime classifies a dial
+      # to host.docker.internal:<port> as localhost:<port> and enforces the
+      # port, which is what makes this a real narrowing: the IDE plugin's own
+      # ephemeral port is never named here and is not reachable from the
+      # sandbox. See "Connecting to an IDE on the host" in README.md.
+      - localhost:27183
       - api.anthropic.com
       - api.openai.com
       - generativelanguage.googleapis.com
@@ -92,3 +100,14 @@ credentials:
         - domain: api.x.ai
           header: Authorization
           format: Bearer %s
+setup:
+  startup:
+    # Locates the host's IDE instance directory among the read-only workspaces
+    # and relays each running IDE to a loopback endpoint Junie can reach, so
+    # `/ide` sees the same project the host has open. A no-op when nothing is
+    # mounted -- see "Connecting to an IDE on the host" in README.md.
+    - command:
+        - sh
+        - /home/agent/.local/bin/junie-ide-relay.sh
+      user: "1000"
+      description: Relay each running host IDE to a loopback endpoint in the sandbox

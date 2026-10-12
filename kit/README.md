@@ -51,6 +51,73 @@ sbx run --kit ./junie/ junie
 Attaching drops you straight into Junie; sandbox creation installs nothing — Junie ships inside the image. The image
 itself still has to be pulled the first time, if it isn't cached locally.
 
+## Connecting to an IDE on the host
+
+Junie can drive a JetBrains IDE you already have open, using it for symbol-aware search, code
+inspections, test workflows, and the IDE's own MCP servers. Junie finds that IDE by reading
+`<Junie Home>/instances/*.json` — a file the IDE's Junie plugin writes, holding the project it has
+open and the loopback port it listens on — and then connecting to `127.0.0.1:<port>`.
+
+Inside a sandbox that loopback is the sandbox's own, where no IDE runs, so the kit bridges the two
+with a pair of relays, one on each side of the boundary:
+
+- **On the host**, `bin/junie-ide-relayd` listens on one fixed loopback port (`27183`) and splices
+  each incoming connection to the IDE that the connection names.
+- **In the sandbox**, `junie-ide-relay.sh` runs at every sandbox start. For each running IDE it
+  opens a loopback endpoint that forwards to that one host port, and writes an instance file naming
+  the endpoint's port and pid — Junie only accepts an endpoint whose pid is a live process in the
+  sandbox.
+
+The two are joined by a one-line preamble: the sandbox endpoint opens each connection with the
+project's digest and the host daemon answers by resolving that digest against the host's instance
+files. The IDE's own ephemeral port is therefore never dialled from the sandbox and never appears in
+the allowlist — the sandbox only ever dials the daemon's fixed port. That is what makes
+`localhost:27183` in `permissions.network.allow` a real narrowing rather than an opening onto every
+host port, and it means an IDE that restarts on a new port keeps working: the daemon re-resolves the
+port on every connection.
+
+Start the daemon before the sandbox:
+
+```console
+python3 junie/bin/junie-ide-relayd &
+```
+
+It needs no arguments; `--port` and `--instances` override the fixed port and the
+`~/.junie/instances` directory it reads. It is a foreground process — run it under whatever
+supervisor you already use, or leave it in a terminal. The sandbox-side relay is a no-op until it is
+up.
+
+Then give the instance files as an extra read-only workspace, replacing `~` with your own home
+directory:
+
+```console
+sbx run --kit "docker.io/sbx/junie-kit:latest" junie . ~/.junie/instances:ro
+```
+
+`~/.junie/instances` may be empty on a host that has never opened a project in a JetBrains IDE with
+the Junie plugin installed: the directory exists only once the plugin has run. The relay is a no-op
+until it does.
+
+Then check the connection from inside:
+
+```console
+> /ide
+```
+
+A `Connected` state names the IDE, its project, and the plugin version. `Missing` means the Junie
+plugin is not installed in the IDE you have open; `Unsupported` means the IDE is older than
+`2026.1`, which is Junie's floor for this integration (see upstream's
+[JetBrains IDE integration](https://junie.jetbrains.com/docs/junie-cli-jetbrains-ide-integration.html)).
+
+The IDE's project must be the same project the sandbox has mounted, and the CLI must run from that
+project or a child directory — Junie matches the two on path, so a sandbox holding the repository at
+a different path selects nothing. Mount the project at its own path, as above, rather than copying
+it in.
+
+The daemon reads the host's instance files itself, so the mount exists only to tell the sandbox
+which projects are open. It holds no state of its own, and killing it costs no more than the sandbox
+endpoints failing to connect.
+
 ## How auth works
 
 The kit's `credentials` list declares an `apiKey` entry per provider, for `junie.jetbrains.com`, `api.anthropic.com`,
@@ -70,6 +137,11 @@ for a newer build at runtime either. `junie.jetbrains.com` stays in the allowlis
 Junie's own multi-channel switching (`junie --eap`, `--nightly`, `--experimental`) is outside this kit's supported
 surface: it fetches and installs another channel's build on demand, and that build's hosts are not part of this
 allowlist.
+
+`localhost:27183` is in the allowlist for [the host IDE connection](#connecting-to-an-ide-on-the-host), not
+for auth: the proxy classifies a dial to `host.docker.internal:<port>` as `localhost:<port>`, so that entry is
+what lets the sandbox-side relay reach `junie-ide-relayd` on the host. It names the daemon's fixed port, not the
+IDE's.
 
 ### Anthropic: API key only, no Claude subscription
 
@@ -143,3 +215,14 @@ TCK's `container` subtest can only pull it locally, so build before you test.
 
 Junie's instructions can be customized by editing `.junie/AGENTS.md` or `AGENTS.md`.
 Junie automatically detects these files and uses them to guide its behavior.
+
+## Cleanup
+
+Stop the host daemon when you are done with the IDE connection — it is a plain foreground process, so
+`Ctrl-C` in its terminal, or `kill` its pid. Ending the sandbox leaves it running, and it holds only
+a listening socket.
+
+Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote under
+`~/.junie/`. Both go with the sandbox; to undo them in a sandbox you are keeping, remove
+`~/.junie/ide-relay/` and the `~/.junie/instances/*.json` files whose names match the digests listed
+there.
