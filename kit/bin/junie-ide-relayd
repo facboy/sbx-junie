@@ -5,9 +5,10 @@ Junie inside the sandbox reaches an IDE at `127.0.0.1:<port>`, naming the port
 from a per-project instance file. A sandbox cannot dial the IDE's own port: the
 kit's egress allowlist must name a port, and the IDE plugin picks an ephemeral
 one that changes on every restart. This daemon gives every IDE the same fixed
-host port instead. The sandbox-side relay opens a loopback endpoint per IDE and
-sends a one-line preamble naming the project; the daemon resolves that project's
-current port from the host's instance files and splices the connection through.
+host port instead. The sandbox-side relay opens a loopback endpoint for the one
+project its sandbox holds and sends a one-line preamble naming that project; the
+daemon resolves it to the IDE's current port from the host's instance files and
+splices the connection through.
 
     bin/junie-ide-relayd [--port PORT] [--instances DIR]
 

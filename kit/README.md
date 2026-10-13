@@ -76,6 +76,10 @@ the allowlist — the sandbox only ever dials the daemon's fixed port. That is w
 host port, and it means an IDE that restarts on a new port keeps working: the daemon re-resolves the
 port on every connection.
 
+Only the project the sandbox holds is published, because an IDE can have several projects open and
+writes an instance file for each. Junie selects an IDE by project path, so an instance file for any
+other project would offer it an IDE with a different project open.
+
 Start the daemon before the sandbox:
 
 ```console

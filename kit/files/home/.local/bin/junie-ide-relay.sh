@@ -9,6 +9,11 @@
 # endpoint's port and its pid, which is what discovery requires to be a live
 # process here.
 #
+# Only the project this sandbox holds is published. A host IDE can have several
+# projects open and writes one instance file per project; Junie picks an IDE by
+# project path, so a file for any other project would offer it an IDE that has a
+# different project open.
+#
 # Every endpoint forwards to one fixed host port -- the `junie-ide-relayd`
 # daemon the kit documents -- naming the project its connection belongs to in a
 # one-line preamble. The daemon owns the mapping from project to the IDE's
@@ -36,17 +41,8 @@ relay_port="${JUNIE_IDE_RELAY_PORT:-27183}"
 relay_span="${JUNIE_IDE_RELAY_PORT_SPAN:-20}"
 endpoint="${JUNIE_IDE_ENDPOINT:-/home/agent/.local/bin/junie-ide-relay-endpoint.py}"
 
-for tool in python3; do
-	command -v "$tool" >/dev/null 2>&1 || exit 0
-done
+command -v python3 >/dev/null 2>&1 || exit 0
 [ -f "$endpoint" ] || exit 0
-
-# The digest names the project a connection belongs to and is also how the
-# plugin names its own instance files: md5 of the project path.
-digest_of() {
-	python3 -c 'import hashlib, sys
-print(hashlib.md5(sys.argv[1].encode()).hexdigest())' "$1" 2>/dev/null
-}
 
 # Locate the host's instance directory. `sbx create` mounts an extra read-only
 # workspace at the path the host named, so this arrives as the host's own
@@ -66,17 +62,26 @@ if [ -z "$host_dir" ]; then
 fi
 [ -n "$host_dir" ] && [ -d "$host_dir" ] || exit 0
 
+# The sandbox's own project is the writable workspace mount, which `sbx create`
+# places at the host's path. JUNIE_IDE_PROJECT wins when set, for a sandbox that
+# mounts the project somewhere other than the path it was created with.
+sandbox_project="${JUNIE_IDE_PROJECT:-}"
+if [ -z "$sandbox_project" ]; then
+	while read -r _ mount_point mount_type mount_options _; do
+		[ "$mount_type" = virtiofs ] || continue
+		case ",$mount_options," in *,ro,*) continue ;; esac
+		case "$mount_point" in /etc/*) continue ;; esac
+		[ -d "$mount_point" ] || continue
+		sandbox_project=$mount_point
+		break
+	done </proc/mounts
+fi
+[ -n "$sandbox_project" ] || sandbox_project=$PWD
+
 mkdir -p "$instances_dir" "$records_dir"
 relays=$(mktemp)
-trap 'rm -f "$relays"' EXIT
-
-json_field() {
-	python3 -c 'import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
-except Exception:
-    pass' "$1" "$2" 2>/dev/null
-}
+wanted=$(mktemp)
+trap 'rm -f "$relays" "$wanted"' EXIT
 
 # Without the daemon there is nothing to dial, so nothing is published and the
 # sandbox is left as it was found. Tested once, before any endpoint is started,
@@ -149,31 +154,51 @@ relay_for_digest() {
 
 daemon_healthy || exit 0
 
-for src in "$host_dir"/*.json; do
-	[ -f "$src" ] || continue
-	host_port=$(json_field "$src" port)
-	case $host_port in '' | *[!0-9]*) continue ;; esac
-	project=$(json_field "$src" project_path)
-	[ -n "$project" ] || continue
-	digest=$(digest_of "$project")
+# The instance files that name this sandbox's own project, as "<digest> <path>"
+# lines. Tab-separated so that a project path containing spaces survives.
+python3 - "$host_dir" "$sandbox_project" <<'PY' >"$wanted"
+import glob, hashlib, json, os, sys
+
+host_dir, sandbox_project = sys.argv[1], sys.argv[2]
+sandbox_root = os.path.realpath(sandbox_project)
+
+for source in sorted(glob.glob(os.path.join(host_dir, "*.json"))):
+    try:
+        with open(source) as handle:
+            project = json.load(handle).get("project_path")
+    except Exception:
+        continue
+    if not isinstance(project, str):
+        continue
+    resolved = os.path.realpath(project)
+    if resolved != sandbox_root and not resolved.startswith(sandbox_root + os.sep):
+        continue
+    print(hashlib.md5(project.encode()).hexdigest(), project, sep="\t")
+PY
+
+while IFS='	' read -r digest project; do
 	[ -n "$digest" ] || continue
-	grep -q "^$digest " "$relays" && continue
+	grep -q "^$digest	" "$relays" && continue
 
 	if relay=$(relay_for_digest "$digest"); then
-		printf '%s %s\n' "$digest" "$relay" >>"$relays"
+		# `relay` is "<port> <pid>"; split it so the record is tab-separated
+		# throughout and a project path with spaces stays one field.
+		set -- $relay
+		printf '%s\t%s\t%s\t%s\n' "$digest" "$project" "$1" "$2" >>"$relays"
 	fi
-done
+done <"$wanted"
 
 python3 - "$host_dir" "$instances_dir" "$relays" <<'PY'
 import glob, hashlib, json, os, sys
 
 host_dir, instances_dir, relays_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-relays = {}
+# "<digest> <project_path> <relay_port> <relay_pid>", one line per project served.
+served = {}
 with open(relays_path) as handle:
     for line in handle:
-        digest, relay_port, relay_pid = line.split()
-        relays[digest] = (int(relay_port), int(relay_pid))
+        digest, project, relay_port, relay_pid = line.split("\t", 3)
+        served[digest] = (int(relay_port), int(relay_pid))
 
 # Index the instance files to publish by the digest that names them. Keying by
 # digest rather than by path leaves one file per project even when the host has
@@ -188,20 +213,26 @@ for source in sorted(glob.glob(os.path.join(host_dir, "*.json"))):
     except Exception:
         continue
     digest = hashlib.md5(info["project_path"].encode()).hexdigest()
-    if digest not in relays:
+    if digest not in served:
         continue
-    info["port"], info["pid"] = relays[digest]
+    info["port"], info["pid"] = served[digest]
     current[digest] = info
 
-# Instance files are named <md5(project_path)>_<pid>.json. Files left by an
-# earlier start name the same projects but an older endpoint pid -- which the
-# container can hand to an unrelated process, leaving the CLI a stale file it
-# reads as a live IDE. Remove only those, identified by the project's digest;
-# every other file in the directory is none of this script's business.
-for digest, info in current.items():
-    for existing in glob.glob(os.path.join(instances_dir, digest + "_*.json")):
-        if os.path.basename(existing) != "%s_%d.json" % (digest, info["pid"]):
-            os.remove(existing)
+# Instance files are named <md5(project_path)>_<pid>.json. A file is stale when
+# its digest is not served at all -- it names a project this sandbox does not
+# hold, or an IDE that has since closed -- or when it names an older endpoint pid
+# than the one serving that project. Either leaves the CLI an endpoint it reads
+# as a live IDE for the wrong project. Remove both kinds, identified by the
+# project's digest; a file that does not follow the naming convention is none of
+# this script's business.
+for existing in glob.glob(os.path.join(instances_dir, "*.json")):
+    name = os.path.basename(existing)
+    digest, _, suffix = name.partition("_")
+    if len(digest) != 32 or not suffix.endswith(".json"):
+        continue
+    if digest in current and name == "%s_%d.json" % (digest, current[digest]["pid"]):
+        continue
+    os.remove(existing)
 
 for name, info in (("%s_%d.json" % (d, i["pid"]), i) for d, i in current.items()):
     with open(os.path.join(instances_dir, name), "w") as handle:
