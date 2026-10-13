@@ -63,10 +63,11 @@ with a pair of relays, one on each side of the boundary:
 
 - **On the host**, `bin/junie-ide-relayd` listens on one fixed loopback port (`27183`) and splices
   each incoming connection to the IDE that the connection names.
-- **In the sandbox**, `junie-ide-relay.sh` runs at every sandbox start. For each running IDE it
-  opens a loopback endpoint that forwards to that one host port, and writes an instance file naming
-  the endpoint's port and pid — Junie only accepts an endpoint whose pid is a live process in the
-  sandbox.
+- **In the sandbox**, `junie-ide-relay.sh` runs at every sandbox start. It opens a loopback
+  endpoint for the project the sandbox holds, forwards it to that one host port, and writes an
+  instance file naming the endpoint's port and pid — Junie only accepts an endpoint whose pid is a
+  live process in the sandbox. A second copy runs as a watcher and repeats that pass, so an IDE you
+  open on the host *after* the sandbox started appears without restarting anything.
 
 The two are joined by a one-line preamble: the sandbox endpoint opens each connection with the
 project's digest and the host daemon answers by resolving that digest against the host's instance

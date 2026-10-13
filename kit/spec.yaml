@@ -103,11 +103,25 @@ credentials:
 setup:
   startup:
     # Locates the host's IDE instance directory among the read-only workspaces
-    # and relays each running IDE to a loopback endpoint Junie can reach, so
-    # `/ide` sees the same project the host has open. A no-op when nothing is
-    # mounted -- see "Connecting to an IDE on the host" in README.md.
+    # and relays this sandbox's own project to a loopback endpoint Junie can
+    # reach, so `/ide` sees the same project the host has open. A no-op when
+    # nothing is mounted -- see "Connecting to an IDE on the host" in README.md.
     - command:
         - sh
         - /home/agent/.local/bin/junie-ide-relay.sh
       user: "1000"
-      description: Relay each running host IDE to a loopback endpoint in the sandbox
+      description: Relay this sandbox's host IDE to a loopback endpoint
+    # A separate process group, and always forked (-f) so this entry returns as
+    # soon as the watcher is started rather than waiting on it: `setsid` without
+    # -f execs in place when its child is already a process-group leader, and the
+    # entry would then never finish. The watcher repeats the pass above, so an
+    # IDE opened on the host after the sandbox started is picked up without a
+    # restart.
+    - command:
+        - setsid
+        - -f
+        - sh
+        - /home/agent/.local/bin/junie-ide-relay.sh
+        - --watch
+      user: "1000"
+      description: Watch for host IDEs opened later and relay them too
