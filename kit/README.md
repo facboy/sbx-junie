@@ -55,8 +55,14 @@ itself still has to be pulled the first time, if it isn't cached locally.
 
 Junie can drive a JetBrains IDE you already have open, using it for symbol-aware search, code
 inspections, test workflows, and the IDE's own MCP servers. Junie finds that IDE by reading
-`<Junie Home>/instances/*.json` — a file the IDE's Junie plugin writes, holding the project it has
+`~/.junie/instances/*.json` — a file the IDE's Junie plugin writes, holding the project it has
 open and the loopback port it listens on — and then connecting to `127.0.0.1:<port>`.
+
+That directory does not follow `JUNIE_HOME`: the CLI resolves it from the `junie.instances.dir`
+system property if set, and otherwise from `user.home` (a JVM property, not `$HOME`), never from
+Junie Home. A sandbox given a custom `JUNIE_HOME` still reads `/home/agent/.junie/instances`, which
+is why `junie-ide-relay.sh` publishes there and takes `JUNIE_IDE_INSTANCES_DIR` for the property's
+override. Set that variable — don't move `JUNIE_HOME` — to relocate the files.
 
 Inside a sandbox that loopback is the sandbox's own, where no IDE runs, so the kit bridges the two
 with a pair of relays, one on each side of the boundary:
@@ -227,7 +233,7 @@ Stop the host daemon when you are done with the IDE connection — it is a plain
 `Ctrl-C` in its terminal, or `kill` its pid. Ending the sandbox leaves it running, and it holds only
 a listening socket.
 
-Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote under
-`~/.junie/`. Both go with the sandbox; to undo them in a sandbox you are keeping, remove
-`~/.junie/ide-relay/` and the `~/.junie/instances/*.json` files whose names match the digests listed
-there.
+Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote there
+and in `/home/agent/.junie/instances`. Both go with the sandbox; to undo them in a sandbox you are
+keeping, remove the `ide-relay/` directory under Junie Home and the `instances/*.json` files whose
+names match the digests listed there.

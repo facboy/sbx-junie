@@ -14,10 +14,18 @@ set -u
 # Startup commands run with a minimal environment: no $HOME, and nothing
 # guarantees PATH names the tools below.
 export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
-JUNIE_HOME_DIR="${JUNIE_HOME:-/home/agent/.junie}"
-instances_dir="$JUNIE_HOME_DIR/instances"
-records_dir="$JUNIE_HOME_DIR/ide-relay"
-watcher_pidfile="$JUNIE_HOME_DIR/ide-relay.pid"
+
+# Junie's own state follows Junie Home, so the relay's bookkeeping does too.
+junie_home="${JUNIE_HOME:-/home/agent/.junie}"
+records_dir="$junie_home/ide-relay"
+watcher_pidfile="$junie_home/ide-relay.pid"
+
+# The instance directory does NOT follow Junie Home: the CLI resolves it from
+# the `junie.instances.dir` system property, else `user.home/.junie/instances`,
+# and never consults JUNIE_HOME. Publishing under Junie Home therefore leaves
+# `/ide` reporting no IDE whenever JUNIE_HOME is set, so this names the path the
+# CLI reads. JUNIE_IDE_INSTANCES_DIR tracks a `-Djunie.instances.dir` override.
+instances_dir="${JUNIE_IDE_INSTANCES_DIR:-/home/agent/.junie/instances}"
 host_dir="${JUNIE_IDE_HOST_DIR:-}"
 ide_host="${JUNIE_IDE_HOST:-host.docker.internal}"
 relay_port="${JUNIE_IDE_RELAY_PORT:-27183}"
