@@ -1,0 +1,24 @@
+# Sample user unit for the host half of the IDE relay. Copy it into
+# ~/.config/systemd/user/, from the root of a clone of this repository, and
+# correct the clone path in ExecStart if it is not at %h/git/sbx-junie:
+#
+#   install -Dm644 systemd/user/junie-ide-relayd.service \
+#       ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now junie-ide-relayd
+
+[Unit]
+Description=Junie IDE relay daemon for this host's sandboxes
+After=default.target
+
+[Service]
+Type=simple
+# Add --instances DIR when the instance files are not under ~/.junie/instances.
+# Leave the port alone: the kit allowlists localhost:27183, the default, and the
+# sandbox reaches the daemon on no other.
+ExecStart=/usr/bin/env python3 %h/git/sbx-junie/bin/junie-ide-relayd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

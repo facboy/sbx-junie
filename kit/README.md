@@ -67,8 +67,9 @@ override. Set that variable — don't move `JUNIE_HOME` — to relocate the file
 Inside a sandbox that loopback is the sandbox's own, where no IDE runs, so the kit bridges the two
 with a pair of relays, one on each side of the boundary:
 
-- **On the host**, `bin/junie-ide-relayd` listens on one fixed loopback port (`27183`) and splices
-  each incoming connection to the IDE that the connection names.
+- **On the host**, `bin/junie-ide-relayd` — at the root of this repo, since nothing in it ships
+  inside the kit — listens on one fixed loopback port (`27183`) and splices each incoming connection
+  to the IDE that the connection names.
 - **In the sandbox**, `junie-ide-relay.sh` runs at every sandbox start. It opens a loopback
   endpoint for the project the sandbox holds, forwards it to that one host port, and writes an
   instance file naming the endpoint's port and pid — Junie only accepts an endpoint whose pid is a
@@ -90,13 +91,26 @@ other project would offer it an IDE with a different project open.
 Start the daemon before the sandbox:
 
 ```console
-python3 junie/bin/junie-ide-relayd &
+python3 bin/junie-ide-relayd &
 ```
 
 It needs no arguments; `--port` and `--instances` override the fixed port and the
-`~/.junie/instances` directory it reads. It is a foreground process — run it under whatever
-supervisor you already use, or leave it in a terminal. The sandbox-side relay is a no-op until it is
-up.
+`~/.junie/instances` directory it reads. The sandbox-side relay is a no-op until it is up.
+
+It is a foreground process, so it can be left in a terminal or put under whatever supervisor you
+already use. This repo's `systemd/user/junie-ide-relayd.service` is a sample user unit for it:
+copy that file into `~/.config/systemd/user/`, edit the path in `ExecStart` if your clone is not at
+`~/git/sbx-junie`, then
+
+```console
+systemctl --user daemon-reload
+systemctl --user enable --now junie-ide-relayd
+```
+
+A user unit needs no root and starts the daemon at login. For it to start at boot instead, before
+any login, allow the user manager to run without one: `sudo loginctl enable-linger "$USER"`. Check
+that it is listening with `systemctl --user status junie-ide-relayd` —
+`listening on 127.0.0.1:27183` in its log is what the sandbox-side relay needs.
 
 Then give the instance files as an extra read-only workspace, replacing `~` with your own home
 directory:
@@ -230,8 +244,9 @@ Junie automatically detects these files and uses them to guide its behavior.
 ## Cleanup
 
 Stop the host daemon when you are done with the IDE connection — it is a plain foreground process, so
-`Ctrl-C` in its terminal, or `kill` its pid. Ending the sandbox leaves it running, and it holds only
-a listening socket.
+`Ctrl-C` in its terminal, or `kill` its pid; under the sample unit above,
+`systemctl --user disable --now junie-ide-relayd` also keeps it from starting at the next login.
+Ending the sandbox leaves it running, and it holds only a listening socket.
 
 Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote there
 and in `/home/agent/.junie/instances`. Both go with the sandbox; to undo them in a sandbox you are
