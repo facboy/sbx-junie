@@ -36,7 +36,8 @@ permissions:
       # to host.docker.internal:<port> as localhost:<port> and enforces the
       # port, which is what makes this a real narrowing: the IDE plugin's own
       # ephemeral port is never named here and is not reachable from the
-      # sandbox. See "Connecting to an IDE on the host" in README.md.
+      # sandbox. See "Relay architecture" in README.md, and the host steps in
+      # ../README.md.
       - localhost:27183
 credentials:
   - service: anthropic
@@ -103,7 +104,7 @@ setup:
     # Locates the host's IDE instance directory among the read-only workspaces
     # and relays this sandbox's own project to a loopback endpoint Junie can
     # reach, so `/ide` sees the same project the host has open. A no-op when
-    # nothing is mounted -- see "Connecting to an IDE on the host" in README.md.
+    # nothing is mounted -- see "Relay architecture" in README.md.
     - command:
         - sh
         - /home/agent/.local/bin/junie-ide-relay.sh

@@ -3,7 +3,8 @@
 # endpoint for the project this sandbox holds, plus the instance file Junie
 # discovers. `--watch` repeats the pass, so an IDE opened on the host after the
 # sandbox started is picked up without restarting the sandbox; a bare run does
-# it once. See "Connecting to an IDE on the host" in README.md.
+# it once. See "Relay architecture" in README.md, and the host steps in
+# ../README.md.
 #
 # Invoked through `sh` because files under `files/home/` land 0644 (see
 # picoclaw). Endpoint pids are recorded under Junie Home and reuse is keyed by
