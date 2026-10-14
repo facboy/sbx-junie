@@ -37,7 +37,7 @@ cd ~/git/some-project
 ```
 
 The script assumes this repo is cloned at `~/git/sbx-junie`, and takes the current directory as the
-sandbox's project — its basename names a per-project `JUNIE_HOME`, and the directory itself is the
+sandbox's project — its basename names a per-project directory, and the directory itself is the
 writable workspace mount. It pins the provider to `ollama` and the model to
 `deepseek-v4.1-flash:cloud`; edit the script to use another.
 
@@ -46,11 +46,34 @@ The host paths it passes:
 - `~/.junie/instances` read-only, which is what tells the sandbox which projects the host has open
   ([Connecting to an IDE on the host](#connecting-to-an-ide-on-the-host)),
 - the read-only view of `~/.junie`, from which `junie-sbx.sh` links `AGENTS.md`, `docs/`, and
-  `tools/` into the per-project `JUNIE_HOME`,
-- `~/.local/share/junie` and `~/.local/bin`, where the host's CLI lives.
+  `tools/` into the Junie home the sandbox writes to,
+- `~/.local/share/junie` and `~/.local/bin`, where the host's CLI lives,
+- the host's uv and pnpm trees, read-only, and a writable overlay over each cache
+  and the pnpm store ([Your uv and pnpm environments](#your-uv-and-pnpm-environments)).
 
 Auth goes through the sandbox proxy; the credentials the kit declares, and why the allowlist names
 no install host, are in [`kit/README.md`](kit/README.md#how-auth-works).
+
+## Your uv and pnpm environments
+
+The sandbox gets your uv and pnpm trees at their host paths, read-only, so its own `uv` and `pnpm`
+resolve the interpreters, tools and store you already have. Because a venv records its interpreter
+by absolute path, and pnpm keys its store to a version and a location, these are reached by
+environment variable rather than by copying them somewhere else:
+
+- `~/.local/share/uv` read-only, with `UV_PYTHON_INSTALL_DIR` and `UV_TOOL_DIR` pointing into it, so
+  `uv venv` reuses your interpreters instead of downloading, and a project's existing `.venv`
+  resolves again. `~/.local/share/fnm` rides along read-only and `junie-init.sh` links its node,
+  since the pnpm that matches your store needs the node it was built for.
+- `~/.cache/uv` and the pnpm store under `~/.local/share/pnpm` are mounted through a per-project
+  overlay: your copies are the read-only lower layer, and everything the sandbox writes goes to an
+  upper layer under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>/overlays`, never to
+  the host trees. That is what lets `uv` and `pnpm` reuse a cache instead of re-downloading.
+  `pnpm`'s store and cache paths reach it through a `~/.npmrc` that `junie-init.sh` writes.
+
+Overlays are created on the host, since a sandbox cannot mount. They need either `fuse-overlayfs`
+or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and the sandbox caches
+locally instead.
 
 ## Connecting to an IDE on the host
 
@@ -119,5 +142,6 @@ Stop the host daemon when you are done with the IDE connection — it is a plain
 `systemctl --user disable --now junie-ide-relayd` also keeps it from starting at the next login.
 Ending the sandbox leaves it running, and it holds only a listening socket.
 
-Each sandbox leaves a `JUNIE_HOME` under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>`.
-Remove that directory to drop the state for a project you have finished with.
+Each project gets one directory under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>`:
+`_junie/` is the Junie home the sandbox writes to, and `overlays/` holds the writable uv and pnpm
+layers. Remove that directory to drop the state for a project you have finished with.

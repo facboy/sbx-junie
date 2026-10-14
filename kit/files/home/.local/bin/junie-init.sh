@@ -4,4 +4,49 @@ mkdir -p ~/.local/share/
 /usr/bin/ln -s "${USER_HOME}/.local/share/junie" ~/.local/share/
 
 mkdir -p ~/.local/bin/
-/usr/bin/ln -s "${USER_HOME}/.local/bin/junie" ~/.local/bin
+/usr/bin/ln -sf "${USER_HOME}/.local/bin/junie" ~/.local/bin/
+
+# The host trees are mounted read-only at their own paths, so each of these is
+# the host's own tool. ~/.local/bin leads PATH, which is what makes the host's
+# uv, pnpm and node the ones that run. Each link is made only if the binary
+# actually executes here: the host's build can be newer than this image's libc,
+# and a link that cannot run would only shadow the tool the image ships.
+link_bin() {
+	[ -x "$1" ] || return 0
+	"$1" --version > /dev/null 2>&1 || return 0
+	/usr/bin/ln -sf "$1" ~/.local/bin/
+}
+
+# node goes first: the node-hosted tools below are scripts whose shebang
+# resolves node from PATH, so they cannot be tested until node is linked.
+# fnm points its `default` alias at the active node version; fall back to
+# whatever is installed when that alias is absent. pnpm keys its store layout to
+# the pnpm that reads it, and that pnpm needs a node it can run on.
+for dir in "${USER_HOME}/.local/share/fnm/aliases/default/installation/bin" \
+	"${USER_HOME}/.local/share/fnm/node-versions/"*/installation/bin; do
+	if [ -x "${dir}/node" ]; then
+		for bin in node npm npx corepack pnpx; do
+			link_bin "${dir}/${bin}"
+		done
+		break
+	fi
+done
+
+link_bin "${USER_HOME}/.local/bin/uv"
+link_bin "${USER_HOME}/.local/bin/uvx"
+link_bin "${PNPM_HOME}/bin/pnpm"
+
+# pnpm reads store and cache locations from .npmrc. Writing them here rather
+# than exporting them keeps one source of truth for the two, and .npmrc is
+# where pnpm looks before it looks anywhere else.
+NPMRC=~/.npmrc
+if [ -n "${JUNIE_PNPM_STORE:-}" ]; then
+	if ! grep -q '^store-dir=' "${NPMRC}" 2> /dev/null; then
+		echo "store-dir=${JUNIE_PNPM_STORE}" >> "${NPMRC}"
+	fi
+fi
+if [ -n "${JUNIE_PNPM_CACHE:-}" ]; then
+	if ! grep -q '^cache-dir=' "${NPMRC}" 2> /dev/null; then
+		echo "cache-dir=${JUNIE_PNPM_CACHE}" >> "${NPMRC}"
+	fi
+fi
