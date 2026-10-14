@@ -1,26 +1,30 @@
 #!/bin/bash
 
-SBX_KIT="/home/chrisng/git/sbx-kits-contrib/junie"
-SBX_STATE_DIR="${HOME}/junie/sbx-state"
-JUNIE_RO="${HOME}/junie/junie_ro"
+set -eu
+
+SBX_KIT="${HOME}/git/sbx-junie/kit"
+
+CONFIG_HOME="${XDG_CONFIG_HOME-${HOME}/.config}/junie-sbx"
+SBX_STATE_DIR="${CONFIG_HOME}/sbx-state"
+DOT_JUNIE_RO="${CONFIG_HOME}/junie_ro/_junie"
+JUNIE_SHARE="${HOME}/.local/share/junie"
 
 PROJ="$(basename $(pwd))"
-
 JUNIE_HOME="${SBX_STATE_DIR}/${PROJ}"
 
 init_junie_home() {
 	mkdir -p "${JUNIE_HOME}"
 
 	# create symlinks
-	ln -s "${JUNIE_RO}/AGENTS.md" "${JUNIE_HOME}"
-	ln -s "${JUNIE_RO}/docs" "${JUNIE_HOME}"
-	ln -s "${JUNIE_RO}/tools" "${JUNIE_HOME}"
+	/usr/bin/ln -s "${DOT_JUNIE_RO}/AGENTS.md" "${JUNIE_HOME}"
+	/usr/bin/ln -s "${DOT_JUNIE_RO}/docs" "${JUNIE_HOME}"
+	/usr/bin/ln -s "${DOT_JUNIE_RO}/tools" "${JUNIE_HOME}"
 
 	# for now, copy sessions over
 	mkdir "${JUNIE_HOME}/sessions"
-	cp "${JUNIE_RO}/sessions/index.jsonl" "${JUNIE_HOME}/sessions/"
+	cp "${DOT_JUNIE_RO}/sessions/index.jsonl" "${JUNIE_HOME}/sessions/"
 	pushd "${JUNIE_HOME}/sessions/" > /dev/null
-	find "${JUNIE_RO}/sessions" -name 'session-*' -exec ln -s {} \;
+	find "${DOT_JUNIE_RO}/sessions" -name 'session-*' -exec ln -s {} \;
 	popd
 }
 
@@ -35,4 +39,8 @@ if [[ ! -d "${JUNIE_HOME}" ]]; then
 	init_junie_home
 fi
 
-sbx run --provider "ollama" --model "deepseek-v4.1-flash:cloud" --env "JUNIE_HOME=${JUNIE_HOME}" "${SBX_KIT}" . "${HOME}/.junie/instances:ro" "${JUNIE_HOME}" "${JUNIE_RO}:ro"
+sbx run \
+    --provider "ollama" --model "deepseek-v4.1-flash:cloud" \
+    --env "JUNIE_HOME=${JUNIE_HOME}" --env "USER_HOME=${HOME}" --env "USER_CONFIG_HOME="${CONFIG_HOME} \
+    "${SBX_KIT}" \
+    . "${JUNIE_HOME}" "${HOME}/.junie/instances:ro" "${DOT_JUNIE_RO}:ro" "${JUNIE_SHARE}:ro" "${HOME}/.local/bin:ro"

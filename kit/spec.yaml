@@ -4,14 +4,8 @@ name: junie
 displayName: Junie
 description: The AI coding agent by JetBrains.
 sandbox:
-  # Pre-baked image: Junie is installed from its stable channel at image-
-  # build time rather than sandbox-create time. Built and published by
-  # build-and-publish-kits.yml, the shared kit-image pipeline (see
-  # ../PUBLISHING.md) -- no bespoke workflow needed, same as
-  # hermes-agent/pi/openclaw/kiro/copilot. Sandbox creation only pulls the
-  # image; the pipeline's nightly rebuild keeps Junie current (rolling
-  # updates, no deliberate version bump -- see the Dockerfile).
-  image: docker.io/sbx/junie-image:latest
+  # Use the host user's junie install
+  image: docker/sandbox-templates:shell
   entrypoint:
     - junie
 agentInstructions:
@@ -19,8 +13,7 @@ agentInstructions:
 permissions:
   network:
     allow:
-      # Junie is baked into the image (see Dockerfile) rather than installed
-      # at sandbox-create time, and the image also sets
+      # Use the host user's junie install, and the spec also sets
       # JUNIE_SKIP_UPDATE_CHECK=1, so the installed binary never checks for
       # or stages a runtime update. That drops github.com,
       # raw.githubusercontent.com, and release-assets.githubusercontent.com
@@ -32,6 +25,11 @@ permissions:
       # install.
       - junie.jetbrains.com
       - api.jetbrains.ai
+      - api.anthropic.com
+      - api.openai.com
+      - generativelanguage.googleapis.com
+      - api.x.ai
+      - openrouter.ai
       # Junie inside the sandbox reaches a host IDE through the
       # `junie-ide-relayd` daemon, which rebinds every IDE onto one fixed
       # host loopback port -- the port below. The runtime classifies a dial
@@ -40,11 +38,6 @@ permissions:
       # ephemeral port is never named here and is not reachable from the
       # sandbox. See "Connecting to an IDE on the host" in README.md.
       - localhost:27183
-      - api.anthropic.com
-      - api.openai.com
-      - generativelanguage.googleapis.com
-      - api.x.ai
-      - openrouter.ai
 credentials:
   - service: anthropic
     apiKey:
@@ -100,6 +93,11 @@ credentials:
         - domain: api.x.ai
           header: Authorization
           format: Bearer %s
+environment:
+  variables:
+    # Seals the shim's own auto-update check (it would otherwise poll
+    # update-info.jsonl and stage a new build). User has to do this from the host.
+    JUNIE_SKIP_UPDATE_CHECK: "1"
 setup:
   startup:
     # Locates the host's IDE instance directory among the read-only workspaces
@@ -109,7 +107,7 @@ setup:
     - command:
         - sh
         - /home/agent/.local/bin/junie-ide-relay.sh
-      user: "1000"
+      user: agent
       description: Relay this sandbox's host IDE to a loopback endpoint
     # A separate process group, and always forked (-f) so this entry returns as
     # soon as the watcher is started rather than waiting on it: `setsid` without
@@ -123,5 +121,11 @@ setup:
         - sh
         - /home/agent/.local/bin/junie-ide-relay.sh
         - --watch
-      user: "1000"
+      user: agent
       description: Watch for host IDEs opened later and relay them too
+    # Init the home dir so the agent can see the host junie install
+    - command:
+        - sh
+        - /home/agent/.local/bin/junie-init.sh
+      user: agent
+      description: Init the home dir so the agent can see the host junie install
