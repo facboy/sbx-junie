@@ -4,8 +4,11 @@ name: junie
 displayName: Junie
 description: The AI coding agent by JetBrains.
 sandbox:
-  # Use the host user's junie install
-  image: docker/sandbox-templates:shell
+  # Use the host user's junie install. The base carries a Docker engine and the
+  # com.docker.sandboxes.start-docker label, so `docker build` and `compose` run
+  # against an engine inside the sandbox's own VM. The plain `shell` base has no
+  # engine, and the host's daemon is unreachable from a sandbox by design.
+  image: docker/sandbox-templates:shell-docker
   entrypoint:
     - junie
 agentInstructions:

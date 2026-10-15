@@ -114,13 +114,16 @@ host-side.
 ## Base image
 
 A `kind: sandbox` kit *is* the whole environment, so it names the image the sandbox boots from. This
-fork names the plain base, `docker/sandbox-templates:shell`: the standard sandbox toolchain, no
-Docker engine, and no Junie in it. The CLI comes from the host instead — the root scripts mount
+fork names `docker/sandbox-templates:shell-docker`: the standard sandbox toolchain plus a Docker
+engine, and no Junie in it. The engine is the sandbox's own, inside its VM — a sandbox has no path to
+the host's daemon — and the template already carries `com.docker.sandboxes.start-docker=true`, which
+is what asks the runtime to start it. The CLI comes from the host instead — the root scripts mount
 `~/.local/bin` and `~/.local/share/junie` read-only, and `junie-init.sh` symlinks them into
 `/home/agent` at startup so the `junie` entrypoint resolves.
 
 That is also why nothing here builds or publishes an image, and why the kit's egress allowlist can
-name no install host: the vendor install script never runs, in the sandbox or at image build.
+name no install host: the vendor install script never runs, in the sandbox or at image build. The
+engine adds no host to the allowlist either, since nothing here installs through it at create time.
 
 `JUNIE_SKIP_UPDATE_CHECK=1`, set by the spec's `environment`, seals the installed binary's own
 runtime auto-update check. Without it the shim polls for and stages a newer build of the channel it

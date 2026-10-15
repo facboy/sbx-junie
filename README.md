@@ -5,8 +5,8 @@ My fork(ish) of https://github.com/docker/sbx-kits-contrib/tree/main/junie
 Uses your user junie install, allows connection to IDE running on the host. The kit is `kit/`,
 described in [`kit/README.md`](kit/README.md); this file is the host side, and how to drive both.
 
-The kit builds no image: the sandbox boots the plain `docker/sandbox-templates:shell`, and the CLI
-comes from the host mount.
+The kit builds no image: the sandbox boots `docker/sandbox-templates:shell-docker` — the standard
+toolchain plus a Docker engine for the sandbox's own VM — and the CLI comes from the host mount.
 
 ## Prerequisites
 
