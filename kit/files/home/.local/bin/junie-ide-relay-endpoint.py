@@ -7,6 +7,11 @@ to the fixed host port the `junie-ide-relayd` daemon listens on; the daemon
 resolves the digest to the IDE's current ephemeral port. Nothing here needs to
 know that port, which is what lets the kit's egress allowlist name one port.
 
+With `--mcp` the preamble instead asks for the IDE's built-in MCP server, which
+binds a port the IDE picks (`mcp <digest>` to the daemon). That endpoint has to
+own that exact port rather than choose one, since the CLI builds the server's
+URL itself as `http://localhost:<port>/stream`.
+
 Written in Python rather than as a `socat SYSTEM:` one-liner: the shell pipeline
 that form needs buffers the reply until its input reaches EOF, which stalls any
 client that keeps its write side open -- which Junie's own requests do.
@@ -19,6 +24,7 @@ import sys
 import threading
 
 PREAMBLE_FORMAT = "JUNIE-RELAY 1 %s\n"
+MCP_PREAMBLE_FORMAT = "JUNIE-RELAY 1 mcp %s\n"
 IDLE_TIMEOUT = 600
 
 
@@ -54,7 +60,7 @@ def splice(client, upstream):
             sock.close()
 
 
-def handle(conn, digest, host, host_port):
+def handle(conn, preamble, host, host_port):
     try:
         upstream = socket.create_connection((host, host_port), timeout=5)
     except OSError as err:
@@ -62,7 +68,7 @@ def handle(conn, digest, host, host_port):
         sys.stderr.write("junie-ide-relay-endpoint: %s:%d: %s\n" % (host, host_port, err))
         return
     try:
-        upstream.sendall((PREAMBLE_FORMAT % digest).encode())
+        upstream.sendall(preamble.encode())
     except OSError:
         conn.close()
         upstream.close()
@@ -72,10 +78,39 @@ def handle(conn, digest, host, host_port):
     splice(conn, upstream)
 
 
+def bind(port):
+    """Listening sockets for `port`, one per available loopback family.
+
+    The CLI builds the built-in MCP server's URL as `http://localhost:<port>`,
+    which resolves to ::1 first, so a listener on IPv4 alone would answer every
+    connection only after a refused IPv6 attempt. Either family may be taken --
+    a host without IPv6, or a sandbox with something already on that port -- so
+    a partial bind still serves, and only having neither is fatal.
+    """
+    listeners = []
+    failure = None
+    for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        listener = socket.socket(family, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            listener.bind((address, port))
+        except OSError as err:
+            listener.close()
+            failure = failure or err
+            continue
+        listener.listen(64)
+        listeners.append(listener)
+    if not listeners:
+        raise failure
+    return listeners
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, required=True, help="loopback port to listen on")
     parser.add_argument("--digest", required=True, help="md5 of the project path this endpoint serves")
+    parser.add_argument("--mcp", action="store_true",
+                        help="serve the IDE's built-in MCP server rather than its RPC")
     parser.add_argument("--host", required=True, help="host the relay daemon runs on")
     parser.add_argument("--host-port", type=int, required=True, help="the relay daemon's port")
     parser.add_argument("--record", required=True,
@@ -84,27 +119,30 @@ def main(argv):
                              "whose port was already taken")
     args = parser.parse_args(argv)
 
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        listener.bind(("127.0.0.1", args.port))
+        listeners = bind(args.port)
     except OSError as err:
         sys.stderr.write("junie-ide-relay-endpoint: port %d: %s\n" % (args.port, err))
         return 1
-    listener.listen(64)
     # Not named `handle`: that is the module-level connection handler above, and
     # a local of the same name would shadow it at the thread target below.
     with open(args.record, "w") as record:
         record.write("%d %d\n" % (args.port, os.getpid()))
 
+    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % args.digest
     while True:
         try:
-            conn, _ = listener.accept()
+            readable, _, _ = select.select(listeners, [], [])
         except OSError:
             continue
-        threading.Thread(target=handle,
-                         args=(conn, args.digest, args.host, args.host_port),
-                         daemon=True).start()
+        for listener in readable:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                continue
+            threading.Thread(target=handle,
+                             args=(conn, preamble, args.host, args.host_port),
+                             daemon=True).start()
 
 
 if __name__ == "__main__":

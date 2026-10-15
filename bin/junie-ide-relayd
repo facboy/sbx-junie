@@ -10,6 +10,14 @@ project its sandbox holds and sends a one-line preamble naming that project; the
 daemon resolves it to the IDE's current port from the host's instance files and
 splices the connection through.
 
+The IDE's built-in MCP server is reached the same way, on a preamble of its own:
+the CLI builds that server's URL itself as `http://localhost:<port>/stream`,
+from a port the plugin hands back over its RPC. That address is the sandbox's own
+loopback, where nothing listens, so `mcp <digest>` resolves the plugin's current
+MCP port and splices to it, and `mcp-port <digest>` answers with that port for a
+sandbox-side endpoint to bind. Both are resolved per connection, since the port
+moves when the IDE restarts.
+
     bin/junie-ide-relayd [--port PORT] [--instances DIR]
 
 Binds `127.0.0.1` only -- the sandbox reaches it through the runtime's
@@ -19,6 +27,7 @@ port is picked up without restarting this daemon.
 """
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import select
@@ -30,6 +39,11 @@ DEFAULT_PORT = 27183
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
 HEALTH_PAYLOAD = b"health"
 HEALTH_REPLY = b"JUNIE-RELAY 1 ok\n"
+MCP_CREDENTIALS_METHOD = "JunieMcpService.getBuiltInMcpServerCredentials"
+MCP_PORT_PREFIX = b"mcp-port "
+MCP_PREFIX = b"mcp "
+MCP_PORT_REPLY = b"JUNIE-RELAY 1 mcp-port %d\n"
+MCP_PORT_NONE = b"JUNIE-RELAY 1 mcp-port none\n"
 MAX_PREAMBLE = 256
 IDLE_TIMEOUT = 600
 
@@ -66,8 +80,13 @@ def read_preamble(conn):
     return line[len(PREAMBLE_PREFIX):]
 
 
-def port_for_digest(instances_dir, digest):
-    """The port the instance file naming `digest` currently advertises.
+def is_digest(payload):
+    text = payload.decode("ascii", "replace")
+    return len(text) == 32 and all(c in "0123456789abcdef" for c in text)
+
+
+def instance_for_digest(instances_dir, digest):
+    """The newest instance file naming `digest`, as (rpc port, its contents).
 
     The digest is `md5(project_path)`, which is also how the plugin names its
     own instance files. Resolved per connection rather than cached so that an
@@ -92,12 +111,58 @@ def port_for_digest(instances_dir, digest):
             port = int(info["port"])
             if not 1 <= port <= 65535:
                 continue
-            found.append((os.stat(path).st_mtime, port))
+            found.append((os.stat(path).st_mtime, port, info))
         except Exception:
             continue
     if not found:
         return None
-    return max(found)[1]
+    _, port, info = max(found, key=lambda entry: (entry[0], entry[1]))
+    return port, info
+
+
+def port_for_digest(instances_dir, digest):
+    """The RPC port the instance file naming `digest` currently advertises."""
+    resolved = instance_for_digest(instances_dir, digest)
+    return None if resolved is None else resolved[0]
+
+
+def mcp_port_for_digest(instances_dir, digest):
+    """The loopback port the IDE named by `digest` serves its built-in MCP on.
+
+    The plugin reports it over its own RPC, so this dials that port with the
+    instance file's token and asks -- the same call the CLI makes when it
+    registers the server as `ijembedded`. The IDE picks the port, and picks a
+    new one when it restarts, so it is resolved per request rather than cached.
+    """
+    resolved = instance_for_digest(instances_dir, digest)
+    if resolved is None:
+        return None
+    rpc_port, info = resolved
+    token = info.get("rpc_token")
+    if not isinstance(token, str):
+        return None
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "method": MCP_CREDENTIALS_METHOD,
+        "params": {},
+        "id": 1,
+    })
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", rpc_port, timeout=5)
+        try:
+            conn.request("POST", "/rpc", body=body, headers={
+                "Authorization": token,
+                "Content-Type": "application/json",
+            })
+            payload = json.loads(conn.getresponse().read().decode())
+        finally:
+            conn.close()
+        port = int(payload["result"]["port"])
+    except Exception:
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    return port
 
 
 def splice(client, upstream):
@@ -134,6 +199,61 @@ def splice(client, upstream):
             sock.close()
 
 
+def splice_to(conn, port, digest):
+    try:
+        upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
+    except OSError as err:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: %s: %s\n" % (digest, err))
+        return
+    upstream.settimeout(None)
+    conn.settimeout(None)
+    splice(conn, upstream)
+
+
+def reply_mcp_port(conn, instances_dir, payload):
+    """Answer with the IDE's built-in MCP port, for a caller to bind.
+
+    One line, like the health reply, so the sandbox side can tell a resolved
+    port from a daemon that cannot reach the IDE.
+    """
+    digest = payload.decode("ascii", "replace")
+    port = mcp_port_for_digest(instances_dir, digest) if is_digest(payload) else None
+    try:
+        conn.sendall(MCP_PORT_REPLY % port if port else MCP_PORT_NONE)
+    except OSError:
+        pass
+    conn.close()
+
+
+def relay_mcp(conn, instances_dir, payload):
+    digest = payload.decode("ascii", "replace")
+    if not is_digest(payload):
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: rejected an MCP preamble without a project digest\n")
+        return
+    port = mcp_port_for_digest(instances_dir, digest)
+    if port is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: no built-in MCP server for digest %s\n" % digest)
+        return
+    splice_to(conn, port, digest)
+
+
+def relay_rpc(conn, instances_dir, payload):
+    digest = payload.decode("ascii", "replace")
+    if not is_digest(payload):
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: rejected a preamble that is neither health nor a project digest\n")
+        return
+    port = port_for_digest(instances_dir, digest)
+    if port is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: no running IDE for digest %s\n" % digest)
+        return
+    splice_to(conn, port, digest)
+
+
 def handle(conn, instances_dir):
     payload = read_preamble(conn)
     if payload is None:
@@ -149,25 +269,13 @@ def handle(conn, instances_dir):
             pass
         conn.close()
         return
-    digest = payload.decode("ascii", "replace")
-    if len(digest) != 32 or not all(c in "0123456789abcdef" for c in digest):
-        conn.close()
-        sys.stderr.write("junie-ide-relayd: rejected a preamble that is neither health nor a project digest\n")
+    if payload.startswith(MCP_PORT_PREFIX):
+        reply_mcp_port(conn, instances_dir, payload[len(MCP_PORT_PREFIX):])
         return
-    port = port_for_digest(instances_dir, digest)
-    if port is None:
-        conn.close()
-        sys.stderr.write("junie-ide-relayd: no running IDE for digest %s\n" % digest)
+    if payload.startswith(MCP_PREFIX):
+        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):])
         return
-    try:
-        upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
-    except OSError as err:
-        conn.close()
-        sys.stderr.write("junie-ide-relayd: IDE %s: %s\n" % (digest, err))
-        return
-    upstream.settimeout(None)
-    conn.settimeout(None)
-    splice(conn, upstream)
+    relay_rpc(conn, instances_dir, payload)
 
 
 def main(argv):

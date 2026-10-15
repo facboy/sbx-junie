@@ -67,6 +67,25 @@ Only the project the sandbox holds is published, because an IDE can have several
 writes an instance file for each. Junie selects an IDE by project path, so an instance file for any
 other project would offer it an IDE with a different project open.
 
+### The IDE's built-in MCP server
+
+The plugin also serves the IDE's own MCP tools, on a port of its choosing, and hands that port to the
+CLI over the RPC above. The CLI then dials `http://localhost:<port>/stream` itself — its own
+loopback, where nothing listens — so that server reports as failed and Junie raises an MCP setup
+notice. The same relay carries it:
+
+- The daemon resolves the port by asking the plugin, over the IDE's RPC, the same
+  `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. `JUNIE-RELAY 1 mcp <digest>`
+  splices to the server; `JUNIE-RELAY 1 mcp-port <digest>` answers with the port, or `none`.
+- `junie-ide-relay.sh` asks for that port on every pass and starts an endpoint bound to it, marked
+  `--mcp` so its preamble names the server rather than the RPC. The endpoint owns the port outright,
+  on `127.0.0.1` and `::1` alike: `localhost` resolves to the IPv6 loopback first, and a listener on
+  one family alone leaves every connection waiting on a refused attempt on the other.
+- The IDE picks a new port when it restarts, so a pass that finds a different one kills the endpoint
+  holding the old port before binding the new. No allowlist entry is involved: the CLI's dial is to
+  its own loopback, never through the proxy, so this is a listener to provide rather than a host to
+  permit.
+
 Starting the daemon, running the sandbox, and checking `/ide` are in the
 [root README](../README.md#connecting-to-an-ide-on-the-host).
 

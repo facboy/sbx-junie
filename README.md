@@ -78,8 +78,8 @@ locally instead.
 ## Connecting to an IDE on the host
 
 Junie can drive a JetBrains IDE you already have open, using it for symbol-aware search, code
-inspections, test workflows, and the IDE's own MCP servers. The two relays that make this work, and
-the spec's `localhost:27183` entry, are described in
+inspections, test workflows, and the IDE's own MCP servers. The two relays that make this work, the
+mirror of the IDE's built-in MCP server, and the spec's `localhost:27183` entry are described in:
 [`kit/README.md`](kit/README.md#relay-architecture); the host steps are below.
 
 Start the daemon before the sandbox:
@@ -129,6 +129,10 @@ a different path selects nothing. Run the sandbox from the project directory its
 The daemon reads the host's instance files itself, so the mount exists only to tell the sandbox
 which projects are open. It holds no state of its own, and killing it costs no more than the sandbox
 endpoints failing to connect.
+
+An IDE's own MCP tools ride the same relay: the CLI dials the IDE's built-in MCP port itself, and
+the sandbox-side endpoint binds that port so the dial lands on the relay. That server reports as
+connected rather than failed in `/mcp`, and the startup MCP setup notice goes away.
 
 ## Customization
 

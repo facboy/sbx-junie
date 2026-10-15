@@ -1,10 +1,10 @@
 #!/bin/sh
 # Publish the host's JetBrains IDEs to Junie inside the sandbox: one loopback
 # endpoint for the project this sandbox holds, plus the instance file Junie
-# discovers. `--watch` repeats the pass, so an IDE opened on the host after the
-# sandbox started is picked up without restarting the sandbox; a bare run does
-# it once. See "Relay architecture" in README.md, and the host steps in
-# ../README.md.
+# discovers, and a mirror of the IDE's built-in MCP server. `--watch` repeats
+# the pass, so an IDE opened on the host after the sandbox started is picked up
+# without restarting the sandbox; a bare run does it once. See "Relay
+# architecture" in README.md, and the host steps in ../README.md.
 #
 # Invoked through `sh` because files under `files/home/` land 0644 (see
 # picoclaw). Endpoint pids are recorded under Junie Home and reuse is keyed by
@@ -112,6 +112,34 @@ is_our_endpoint() {
 	tr '\0' '.' <"/proc/$1/cmdline" 2>/dev/null | grep -q 'junie-ide-relay-endpoint'
 }
 
+# The port the IDE named by digest $1 serves its built-in MCP server on, or
+# nothing. Only the plugin knows the port, so the daemon asks it over the RPC
+# relay and answers with the port -- or says there is none. A non-numeric answer
+# is nothing too: the port is bound verbatim, so anything else would be an
+# endpoint that dies on its argument and a pass that waits out its record.
+# Nothing is what a failed call gives too, and the caller leaves the existing
+# mirror in place for it: the daemon answers the same way when the plugin has no
+# built-in server and when the RPC call itself failed, and a momentary failure
+# must not tear down a mirror that works.
+mcp_port_for_digest() {
+	reply=$(python3 -c '
+import socket, sys
+try:
+    conn = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)
+    conn.sendall(("JUNIE-RELAY 1 mcp-port %s\n" % sys.argv[3]).encode())
+    sys.stdout.write(conn.recv(64).decode("ascii", "replace"))
+except Exception:
+    pass' "$ide_host" "$relay_port" "$1" 2>/dev/null)
+	case $reply in
+	'JUNIE-RELAY 1 mcp-port '*) reply=${reply#JUNIE-RELAY 1 mcp-port } ;;
+	*) return 0 ;;
+	esac
+	case $reply in
+	*[!0-9]*|'') return 0 ;;
+	esac
+	printf '%s' "$reply"
+}
+
 # Echo "<relay_port> <relay_pid>" for an endpoint serving project digest $1,
 # reusing one an earlier pass left running. An endpoint's identity is its digest,
 # not its port: every endpoint dials the same fixed host port, so two endpoints
@@ -121,15 +149,16 @@ is_our_endpoint() {
 # detected by that bind failing rather than by guessing at what runs there.
 relay_for_digest() {
 	digest=$1
+	record="$records_dir/$digest"
 
-	if [ -f "$records_dir/$digest" ]; then
-		read -r recorded_port recorded_pid <"$records_dir/$digest" || true
+	if [ -f "$record" ]; then
+		read -r recorded_port recorded_pid <"$record" || true
 		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
 			is_our_endpoint "$recorded_pid"; then
 			printf '%s %s\n' "$recorded_port" "$recorded_pid"
 			return 0
 		fi
-		rm -f "$records_dir/$digest"
+		rm -f "$record"
 	fi
 
 	offset=0
@@ -139,27 +168,69 @@ relay_for_digest() {
 
 		# Cleared first so that a record left by an endpoint that has since died
 		# cannot be mistaken for this attempt's successful bind.
-		rm -f "$records_dir/$digest"
+		rm -f "$record"
 
 		# setsid so the endpoint outlives this script and can be signalled as
 		# its own process group.
 		setsid python3 "$endpoint" --port "$candidate" --digest "$digest" \
 			--host "$ide_host" --host-port "$relay_port" \
-			--record "$records_dir/$digest" >/dev/null 2>&1 &
+			--record "$record" >/dev/null 2>&1 &
 
 		# The endpoint writes its record only after a successful bind, so this
 		# waits for the file rather than for a guessed startup delay.
 		waited=0
-		while [ "$waited" -lt 30 ] && [ ! -s "$records_dir/$digest" ]; do
+		while [ "$waited" -lt 30 ] && [ ! -s "$record" ]; do
 			sleep 0.1
 			waited=$((waited + 1))
 		done
-		if [ -s "$records_dir/$digest" ]; then
-			read -r bound_port bound_pid <"$records_dir/$digest"
+		if [ -s "$record" ]; then
+			read -r bound_port bound_pid <"$record"
 			printf '%s %s\n' "$bound_port" "$bound_pid"
 			return 0
 		fi
 	done
+	return 1
+}
+
+# Echo "<port> <pid>" for an endpoint mirroring project digest $1's built-in MCP
+# server, which the IDE serves on port $2. The port is the IDE's own rather than
+# one of ours: the CLI resolves it over the RPC relay and then dials
+# localhost:<port> itself, so the mirror has to hold that exact port. The IDE
+# picks a new one when it restarts, so a record naming any other port is dropped
+# -- and its endpoint killed, which unbinds the port the old IDE left behind --
+# before the new bind. One already bound to the port the IDE serves now is kept.
+relay_mcp_for_digest() {
+	digest=$1
+	mcp_port=$2
+	record="$records_dir/mcp-$digest"
+
+	if [ -f "$record" ]; then
+		read -r recorded_port recorded_pid <"$record" || true
+		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
+			is_our_endpoint "$recorded_pid"; then
+			if [ "$recorded_port" = "$mcp_port" ]; then
+				printf '%s %s\n' "$recorded_port" "$recorded_pid"
+				return 0
+			fi
+			kill "$recorded_pid" 2>/dev/null
+		fi
+		rm -f "$record"
+	fi
+
+	setsid python3 "$endpoint" --port "$mcp_port" --digest "$digest" --mcp \
+		--host "$ide_host" --host-port "$relay_port" \
+		--record "$record" >/dev/null 2>&1 &
+
+	waited=0
+	while [ "$waited" -lt 30 ] && [ ! -s "$record" ]; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	if [ -s "$record" ]; then
+		read -r bound_port bound_pid <"$record"
+		printf '%s %s\n' "$bound_port" "$bound_pid"
+		return 0
+	fi
 	return 1
 }
 
@@ -206,11 +277,25 @@ relay_pass() {
 		fi
 	done <"$wanted"
 
+	# The built-in MCP server, on the port the IDE chose rather than one named
+	# here: the CLI dials localhost:<port> for it, so the mirror binds that port.
+	# Asked every pass, since the IDE picks a new port when it restarts, and the
+	# mirror drops the listener it left on the old one.
+	while IFS='	' read -r digest project; do
+		[ -n "$digest" ] || continue
+		mcp_port=$(mcp_port_for_digest "$digest")
+		[ -n "$mcp_port" ] || continue
+		relay_mcp_for_digest "$digest" "$mcp_port" >/dev/null || true
+	done <"$wanted"
+
 	# Stop endpoints for projects the sandbox no longer has open, so that a
-	# watcher left running for a long time does not accumulate bound ports.
+	# watcher left running for a long time does not accumulate bound ports. An
+	# MCP record is keyed "mcp-<digest>", so both kinds name the same project
+	# and both are kept while that project is open.
 	for record in "$records_dir"/*; do
 		[ -f "$record" ] || continue
-		digest=${record##*/}
+		name=${record##*/}
+		digest=${name#mcp-}
 		grep -q "^$digest	" "$wanted" && continue
 		# The record is "<port> <pid>"; the pid is the field to signal.
 		read -r _ endpoint_pid <"$record" || true
