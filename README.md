@@ -132,7 +132,19 @@ endpoints failing to connect.
 
 An IDE's own MCP tools ride the same relay: the CLI dials the IDE's built-in MCP port itself, and
 the sandbox-side endpoint binds that port so the dial lands on the relay. That server reports as
-connected rather than failed in `/mcp`, and the startup MCP setup notice goes away.
+connected rather than failed in `/mcp`, and the startup MCP setup notice goes away. The sandbox relay
+holds a mirror only while the daemon reports the IDE's port, and frees it when the IDE goes away or
+names no built-in server, so a port the IDE gave up is not held open.
+
+The two halves speak a versioned protocol, and the sandbox publishes nothing against a daemon older
+than it needs — a daemon started before one of its preambles closed its connection silently, which
+reads as a dead IDE. So restart the daemon after pulling a change to it:
+
+```console
+systemctl --user restart junie-ide-relayd
+```
+
+The sandbox's watcher picks the work up within a tick, without restarting the sandbox.
 
 ## Customization
 

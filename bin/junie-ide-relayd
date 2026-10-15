@@ -18,6 +18,14 @@ MCP port and splices to it, and `mcp-port <digest>` answers with that port for a
 sandbox-side endpoint to bind. Both are resolved per connection, since the port
 moves when the IDE restarts.
 
+`mcp-port` answers `none` when the plugin reports no built-in server, and `gone`
+when the IDE behind the digest is no longer running. The sandbox closes a mirror
+for either, so a port the IDE gave up is not held open, but keeps one for
+`unknown` -- the plugin answered nothing, which a momentary failure looks like
+too. The health reply names the protocol version, so a sandbox can tell this
+daemon from one started before it learned these preambles and ask for a restart
+rather than read the silence as a dead IDE.
+
     bin/junie-ide-relayd [--port PORT] [--instances DIR]
 
 Binds `127.0.0.1` only -- the sandbox reaches it through the runtime's
@@ -37,13 +45,24 @@ import threading
 
 DEFAULT_PORT = 27183
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
+# Bumped when a preamble the sandbox side depends on is added, so that a daemon
+# started before it is recognisable rather than silently rejecting the preamble.
+# A daemon too old to name a version answers the bare `ok` a 1 daemon also does.
+PROTOCOL_VERSION = 2
 HEALTH_PAYLOAD = b"health"
-HEALTH_REPLY = b"JUNIE-RELAY 1 ok\n"
+HEALTH_REPLY = ("JUNIE-RELAY 1 ok %d\n" % PROTOCOL_VERSION).encode()
 MCP_CREDENTIALS_METHOD = "JunieMcpService.getBuiltInMcpServerCredentials"
 MCP_PORT_PREFIX = b"mcp-port "
 MCP_PREFIX = b"mcp "
 MCP_PORT_REPLY = b"JUNIE-RELAY 1 mcp-port %d\n"
 MCP_PORT_NONE = b"JUNIE-RELAY 1 mcp-port none\n"
+# The IDE behind the digest is gone, distinct from `none`: the plugin was asked
+# and answered, and there is no IDE to hold a port for. The sandbox drops the
+# mirror on it.
+MCP_PORT_GONE = b"JUNIE-RELAY 1 mcp-port gone\n"
+# The plugin did not answer, so the port is not known to have moved. The sandbox
+# keeps its mirror on this, since a momentary failure answers the same way.
+MCP_PORT_UNKNOWN = b"JUNIE-RELAY 1 mcp-port unknown\n"
 MAX_PREAMBLE = 256
 IDLE_TIMEOUT = 600
 
@@ -127,20 +146,33 @@ def port_for_digest(instances_dir, digest):
 
 
 def mcp_port_for_digest(instances_dir, digest):
-    """The loopback port the IDE named by `digest` serves its built-in MCP on.
+    """Resolve the loopback port the IDE named by `digest` serves its MCP on.
 
-    The plugin reports it over its own RPC, so this dials that port with the
-    instance file's token and asks -- the same call the CLI makes when it
+    Returns (outcome, port), where the outcome is one of:
+
+    - `port`: the plugin named a port, returned alongside it.
+    - `none`: the plugin answered and named no built-in server, so there is
+      nothing to mirror.
+    - `gone`: the IDE behind the digest is not running -- no instance file names
+      it, or its RPC port refuses, which is what a file a killed IDE left behind
+      looks like. Any mirror of it holds a port nothing will use again.
+    - `unknown`: the plugin did not answer, or answered something unusable. This
+      is what a momentary failure -- and a plugin too old to serve the call --
+      looks like too, so a caller keeps the mirror it has rather than dropping a
+      working one.
+
+    The plugin reports the port over its own RPC, so this dials that port with
+    the instance file's token and asks -- the same call the CLI makes when it
     registers the server as `ijembedded`. The IDE picks the port, and picks a
     new one when it restarts, so it is resolved per request rather than cached.
     """
     resolved = instance_for_digest(instances_dir, digest)
     if resolved is None:
-        return None
+        return "gone", None
     rpc_port, info = resolved
     token = info.get("rpc_token")
     if not isinstance(token, str):
-        return None
+        return "unknown", None
     body = json.dumps({
         "jsonrpc": "2.0",
         "method": MCP_CREDENTIALS_METHOD,
@@ -157,12 +189,28 @@ def mcp_port_for_digest(instances_dir, digest):
             payload = json.loads(conn.getresponse().read().decode())
         finally:
             conn.close()
-        port = int(payload["result"]["port"])
+        result = payload.get("result")
+        if not isinstance(result, dict) or result.get("error") is not None:
+            return "unknown", None
+        port = result.get("port")
+    except ConnectionRefusedError:
+        # Nothing listens on the port the instance file names, so the IDE that
+        # wrote it is not running. A refused port is the only failure read as
+        # `gone`: a server that accepts and then closes without answering is
+        # `unknown` below, since a plugin that cannot serve this call is
+        # indistinguishable from a momentary one.
+        return "gone", None
     except Exception:
-        return None
+        return "unknown", None
+    if port is None:
+        return "none", None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return "unknown", None
     if not 1 <= port <= 65535:
-        return None
-    return port
+        return "unknown", None
+    return "port", port
 
 
 def splice(client, upstream):
@@ -215,12 +263,22 @@ def reply_mcp_port(conn, instances_dir, payload):
     """Answer with the IDE's built-in MCP port, for a caller to bind.
 
     One line, like the health reply, so the sandbox side can tell a resolved
-    port from a daemon that cannot reach the IDE.
+    port from a daemon that cannot reach the IDE. `none` and `gone` are told
+    apart from `unknown` because the caller drops a mirror on the first two and
+    keeps it on the last -- see `mcp_port_for_digest`.
     """
-    digest = payload.decode("ascii", "replace")
-    port = mcp_port_for_digest(instances_dir, digest) if is_digest(payload) else None
+    outcome, port = (mcp_port_for_digest(instances_dir, payload.decode("ascii", "replace"))
+                     if is_digest(payload) else ("unknown", None))
+    if outcome == "port":
+        reply = MCP_PORT_REPLY % port
+    elif outcome == "none":
+        reply = MCP_PORT_NONE
+    elif outcome == "gone":
+        reply = MCP_PORT_GONE
+    else:
+        reply = MCP_PORT_UNKNOWN
     try:
-        conn.sendall(MCP_PORT_REPLY % port if port else MCP_PORT_NONE)
+        conn.sendall(reply)
     except OSError:
         pass
     conn.close()
@@ -232,10 +290,11 @@ def relay_mcp(conn, instances_dir, payload):
         conn.close()
         sys.stderr.write("junie-ide-relayd: rejected an MCP preamble without a project digest\n")
         return
-    port = mcp_port_for_digest(instances_dir, digest)
-    if port is None:
+    outcome, port = mcp_port_for_digest(instances_dir, digest)
+    if outcome != "port":
         conn.close()
-        sys.stderr.write("junie-ide-relayd: no built-in MCP server for digest %s\n" % digest)
+        sys.stderr.write("junie-ide-relayd: no built-in MCP server for digest %s (%s)\n"
+                         % (digest, outcome))
         return
     splice_to(conn, port, digest)
 
@@ -262,7 +321,9 @@ def handle(conn, instances_dir):
         return
     if payload == HEALTH_PAYLOAD:
         # Lets the sandbox-side relay tell "daemon absent" from "daemon here"
-        # in one round trip, instead of inferring it from a failed relay.
+        # in one round trip, instead of inferring it from a failed relay. The
+        # reply names the protocol version, so a daemon started before a
+        # preamble was added is told apart from one that has it.
         try:
             conn.sendall(HEALTH_REPLY)
         except OSError:

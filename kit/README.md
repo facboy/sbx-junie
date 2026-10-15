@@ -76,15 +76,28 @@ notice. The same relay carries it:
 
 - The daemon resolves the port by asking the plugin, over the IDE's RPC, the same
   `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. `JUNIE-RELAY 1 mcp <digest>`
-  splices to the server; `JUNIE-RELAY 1 mcp-port <digest>` answers with the port, or `none`.
+  splices to the server; `JUNIE-RELAY 1 mcp-port <digest>` answers with the port, `none` when the
+  plugin names no built-in server, `gone` when the IDE behind the digest is not running, or
+  `unknown` when the plugin did not answer.
 - `junie-ide-relay.sh` asks for that port on every pass and starts an endpoint bound to it, marked
   `--mcp` so its preamble names the server rather than the RPC. The endpoint owns the port outright,
   on `127.0.0.1` and `::1` alike: `localhost` resolves to the IPv6 loopback first, and a listener on
   one family alone leaves every connection waiting on a refused attempt on the other.
 - The IDE picks a new port when it restarts, so a pass that finds a different one kills the endpoint
-  holding the old port before binding the new. No allowlist entry is involved: the CLI's dial is to
-  its own loopback, never through the proxy, so this is a listener to provide rather than a host to
-  permit.
+  holding the old port before binding the new. A pass answering `none` or `gone` frees the mirror
+  for the same reason — the port is the IDE's, and nothing will use it again — while `unknown` keeps
+  it, since a momentary RPC failure answers that way and dropping a working mirror for one would
+  drop the IDE MCP connection until the next pass rebuilt it. No allowlist entry is involved: the
+  CLI's dial is to its own loopback, never through the proxy, so this is a listener to provide
+  rather than a host to permit.
+- The two halves share a protocol version, and the relay script skips the mirror while the daemon
+  answers a lower one or none at all. A daemon started before a preamble was added closes its
+  connection silently, which reads as a dead IDE, so the `health` reply names the version and the
+  script reports the mismatch once rather than leaving it to look like an IDE that is down. Only the
+  mirror is skipped: the RPC relay works against any daemon, so an older one costs the IDE's MCP
+  server and nothing else. **Restart the daemon after pulling a change to it**, since a running
+  daemon keeps the preambles it started with; the sandbox's watcher then picks the work up within a
+  tick, without restarting the sandbox.
 
 Starting the daemon, running the sandbox, and checking `/ide` are in the
 [root README](../README.md#connecting-to-an-ide-on-the-host).

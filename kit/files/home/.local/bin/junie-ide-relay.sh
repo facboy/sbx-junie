@@ -87,8 +87,15 @@ relays=$(mktemp)
 wanted=$(mktemp)
 trap 'rm -f "$relays" "$wanted"' EXIT
 
+# The protocol version the daemon must speak for the MCP preambles to be
+# answered. A daemon started before they were added closes those connections
+# silently, which reads as a dead port, so its absence is reported rather than
+# left to look like an IDE that is down.
+required_daemon_version=2
+
 # Without the daemon there is nothing to dial, so nothing is published and the
-# sandbox is left as it was found.
+# sandbox is left as it was found. The version is checked separately: the RPC
+# relay works against any daemon, so an older one costs only the MCP mirror.
 daemon_healthy() {
 	reply=$(python3 -c '
 import socket, sys
@@ -104,6 +111,27 @@ except Exception:
 	return 1
 }
 
+# The protocol version the daemon reports, or nothing when it is older than the
+# version banner itself. Only a daemon that names one has been restarted since
+# the banner was added, so this is what tells the two apart.
+daemon_version() {
+	reply=$(python3 -c '
+import socket, sys
+try:
+    conn = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)
+    conn.sendall(b"JUNIE-RELAY 1 health\n")
+    sys.stdout.write(conn.recv(64).decode("ascii", "replace"))
+except Exception:
+    pass' "$ide_host" "$relay_port" 2>/dev/null)
+	case $reply in
+	'JUNIE-RELAY 1 ok '*) printf '%s' "${reply#JUNIE-RELAY 1 ok }" ;;
+	esac
+}
+
+# Set once per run, so a daemon that needs restarting is named in the log rather
+# than reported on every tick.
+stale_daemon_reported=0
+
 # Whether pid $1 is still the endpoint this script started. A recorded pid can be
 # handed to an unrelated process once its endpoint dies, so it is confirmed
 # against its command line before anything signals it.
@@ -112,15 +140,18 @@ is_our_endpoint() {
 	tr '\0' '.' <"/proc/$1/cmdline" 2>/dev/null | grep -q 'junie-ide-relay-endpoint'
 }
 
-# The port the IDE named by digest $1 serves its built-in MCP server on, or
-# nothing. Only the plugin knows the port, so the daemon asks it over the RPC
-# relay and answers with the port -- or says there is none. A non-numeric answer
-# is nothing too: the port is bound verbatim, so anything else would be an
-# endpoint that dies on its argument and a pass that waits out its record.
-# Nothing is what a failed call gives too, and the caller leaves the existing
-# mirror in place for it: the daemon answers the same way when the plugin has no
-# built-in server and when the RPC call itself failed, and a momentary failure
-# must not tear down a mirror that works.
+# The IDE's built-in MCP port, as "<outcome> [port]". The daemon resolves it by
+# asking the plugin over the RPC relay, and answers with one of:
+#
+#   port <n>  the plugin named a port to mirror
+#   none      the plugin answered without a built-in server
+#   gone      no instance file names the digest, so that IDE is not running
+#   unknown   the plugin did not answer, or answered unusably
+#
+# `none` and `gone` free a mirror the caller holds -- the port is the IDE's, and
+# nothing will use it again. `unknown` must not: a momentary RPC failure answers
+# the same way, and tearing down a working mirror for it would drop the IDE MCP
+# connection until the next pass rebuilt it.
 mcp_port_for_digest() {
 	reply=$(python3 -c '
 import socket, sys
@@ -132,12 +163,26 @@ except Exception:
     pass' "$ide_host" "$relay_port" "$1" 2>/dev/null)
 	case $reply in
 	'JUNIE-RELAY 1 mcp-port '*) reply=${reply#JUNIE-RELAY 1 mcp-port } ;;
-	*) return 0 ;;
+	*) printf 'unknown\n' ; return 0 ;;
 	esac
 	case $reply in
-	*[!0-9]*|'') return 0 ;;
+	none|gone) printf '%s\n' "$reply" ;;
+	*[!0-9]*|'') printf 'unknown\n' ;;
+	*) printf 'port %s\n' "$reply" ;;
 	esac
-	printf '%s' "$reply"
+}
+
+# Stop the mirror for digest $1 and drop its record, freeing the port the IDE no
+# longer serves. A record whose pid is gone or is not an endpoint of ours is
+# removed without a signal.
+stop_mcp_mirror() {
+	record="$records_dir/mcp-$1"
+	[ -f "$record" ] || return 0
+	read -r _ endpoint_pid <"$record" || true
+	if [ -n "${endpoint_pid:-}" ] && is_our_endpoint "$endpoint_pid"; then
+		kill "$endpoint_pid" 2>/dev/null
+	fi
+	rm -f "$record"
 }
 
 # Echo "<relay_port> <relay_pid>" for an endpoint serving project digest $1,
@@ -280,13 +325,30 @@ relay_pass() {
 	# The built-in MCP server, on the port the IDE chose rather than one named
 	# here: the CLI dials localhost:<port> for it, so the mirror binds that port.
 	# Asked every pass, since the IDE picks a new port when it restarts, and the
-	# mirror drops the listener it left on the old one.
-	while IFS='	' read -r digest project; do
-		[ -n "$digest" ] || continue
-		mcp_port=$(mcp_port_for_digest "$digest")
-		[ -n "$mcp_port" ] || continue
-		relay_mcp_for_digest "$digest" "$mcp_port" >/dev/null || true
-	done <"$wanted"
+	# mirror drops the listener it left on the old one. An outcome that frees the
+	# port -- `none` or `gone` -- stops the mirror, so one is not held for the
+	# IDE's port after the IDE gave it up.
+	#
+	# A daemon too old to answer this preamble closes the connection, which is
+	# the same shape as `unknown`. Skipped instead, so that the mirror the daemon
+	# already holds is left running and the IDE relay above is unaffected.
+	version=$(daemon_version)
+	if [ -n "$version" ] && [ "$version" -ge "$required_daemon_version" ] 2>/dev/null; then
+		while IFS='	' read -r digest project; do
+			[ -n "$digest" ] || continue
+			resolution=$(mcp_port_for_digest "$digest")
+			set -- $resolution
+			case "${1:-}" in
+			port) relay_mcp_for_digest "$digest" "$2" >/dev/null || true ;;
+			none|gone) stop_mcp_mirror "$digest" ;;
+			esac
+		done <"$wanted"
+	elif [ "$stale_daemon_reported" = 0 ]; then
+		stale_daemon_reported=1
+		echo "junie-ide-relay: the host junie-ide-relayd speaks protocol" \
+			"${version:-1}, this relay needs $required_daemon_version:" \
+			"restart it for the IDE's MCP server to be relayed" >&2
+	fi
 
 	# Stop endpoints for projects the sandbox no longer has open, so that a
 	# watcher left running for a long time does not accumulate bound ports. An
