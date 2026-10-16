@@ -656,15 +656,22 @@ def read_body(conn, headers):
 def is_bounded(head, headers):
     """Whether a response ends by itself, rather than streaming until close.
 
-    `GET /stream` is the session's server-to-client channel and declares no
-    length: it stays open for the life of the session, so the daemon has to
-    pass it through as it arrives instead of reading it to an end.
+    A declared length, or a terminating chunk, ends the body. `GET /stream` is
+    the session's server-to-client channel: it is chunked for the life of the
+    session and ends only when the session does, so a chunked body is not
+    bounded on its own and the stream has to be passed through as it arrives.
     """
+    if is_event_stream(headers):
+        return False
     if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
         return True
-    if b"content-length" in headers:
-        return True
-    return header_status(head) in (204, 304)
+    return b"content-length" in headers or header_status(head) in (204, 304)
+
+
+def is_event_stream(headers):
+    """Whether a response is an SSE stream, which ends when it closes."""
+    media_type = headers.get(b"content-type", b"").split(b";", 1)[0]
+    return media_type.strip().lower() == b"text/event-stream"
 
 
 def header_status(head):
