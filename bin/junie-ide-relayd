@@ -6,23 +6,40 @@ from a per-project instance file. A sandbox cannot dial the IDE's own port: the
 kit's egress allowlist must name a port, and the IDE plugin picks an ephemeral
 one that changes on every restart. This daemon gives every IDE the same fixed
 host port instead. The sandbox-side relay opens a loopback endpoint for the one
-project its sandbox holds and sends a one-line preamble naming that project; the
-daemon resolves it to the IDE's current port from the host's instance files and
-splices the connection through.
+project its sandbox holds and sends a one-line preamble naming that project and
+the secret it was provisioned with; the daemon resolves the digest to the IDE's
+current port from the host's instance files, checks the secret against the
+project it authorises, and splices the connection through.
 
 The IDE's built-in MCP server is reached the same way, on a preamble of its own:
 the CLI builds that server's URL itself as `http://localhost:<port>/stream`,
 from a port the plugin hands back over its RPC. That address is the sandbox's own
-loopback, where nothing listens, so `mcp <digest>` resolves the plugin's current
-MCP port and splices to it, and `mcp-port <digest>` answers with that port for a
-sandbox-side endpoint to bind. Both are resolved per connection, since the port
-moves when the IDE restarts.
+loopback, where nothing listens, so `mcp <digest> <secret>` resolves the plugin's
+current MCP port and splices to it, and `mcp-port <digest> <secret>` answers with
+that port for a sandbox-side endpoint to bind. Both are resolved per connection,
+since the port moves when the IDE restarts.
 
 The MCP exchange is parsed rather than spliced byte for byte, so that only the
 tools the sandbox needs reach the host: see `splice_mcp`. A tool the allowlist
 does not name is removed from `tools/list` and refused on `tools/call`, so a tool
 a later IDE build adds arrives unreviewed rather than unrestricted. The RPC
 relay above is left a plain splice.
+
+Every preamble but `health` carries the sandbox's secret, which `junie-sbx.sh`
+provisions as it starts the sandbox: one record per project under
+`${XDG_CONFIG_HOME:-$HOME/.config}/junie-sbx/relay-secrets`, naming the project
+and its secret. A connection is spliced only when its secret matches a record
+whose project contains the IDE's, so a sandbox reaches its own project's IDE and
+no other, and a local process without the secret reaches nothing at all. A digest
+that resolves to no IDE is answered as before -- `gone` says there is nothing to
+reach -- so the check does not depend on an IDE being up. A host with no records
+relays nothing.
+
+A secret is only a credential while it is the operator's alone, so the daemon
+refuses to start when the records, or the directory holding them, are reachable
+beyond their owner: the fix it names is `chmod 700` and `chmod 600`, which is
+what `junie-sbx.sh` writes. Refusing rather than skipping, since a daemon that
+started anyway would keep a reach its operator believes it denied.
 
 The tool allowlist comes from `DEFAULT_ALLOW_TOOLS` unless a TOML config file or
 the flags below name another:
@@ -33,8 +50,9 @@ It is read from `${XDG_CONFIG_HOME:-$HOME/.config}/junie-sbx/relayd.toml`, or
 `$JUNIE_IDE_RELAYD_CONFIG`, or `--config PATH`, each overriding the one before.
 `SIGHUP` re-reads it, so a change needs no restart.
 
-    bin/junie-ide-relayd [--port PORT] [--instances DIR] [--config PATH]
-                          [--allow-tool NAME]... [--no-tool-filter]
+    bin/junie-ide-relayd [--port PORT] [--instances DIR] [--secrets DIR]
+                          [--config PATH] [--allow-tool NAME]...
+                          [--no-tool-filter]
 
 `mcp-port` answers `none` when the plugin reports no built-in server, and `gone`
 when the IDE behind the digest is no longer running. The sandbox closes a mirror
@@ -44,15 +62,17 @@ too. The health reply names the protocol version, so a sandbox can tell this
 daemon from one started before it learned these preambles and ask for a restart
 rather than read the silence as a dead IDE.
 
-    bin/junie-ide-relayd [--port PORT] [--instances DIR]
-
 Binds `127.0.0.1` only -- the sandbox reaches it through the runtime's
-host-loopback forwarding, which the kit allowlists as `localhost:<PORT>`. The
-instance files are re-read on every connection, so an IDE that restarts on a new
-port is picked up without restarting this daemon.
+host-loopback forwarding, which the kit allowlists as `localhost:<PORT>`.
+Loopback is shared with every other local process, so the port is no boundary by
+itself; the secret is what keeps one sandbox out of another project's IDE. Both
+the instance files and the secret records are re-read on every connection, so an
+IDE that restarts on a new port, or a project provisioned after this daemon
+started, needs no restart.
 """
 import argparse
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -65,11 +85,16 @@ import tomllib
 
 DEFAULT_PORT = 27183
 CONFIG_BASENAME = "relayd.toml"
+SECRETS_DIRNAME = "relay-secrets"
+# Records hold the hex `secrets.token_hex(32)` that `junie-sbx.sh` wrote.
+SECRET_HEX_LEN = 64
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
 # Bumped when a preamble the sandbox side depends on is added, so that a daemon
 # started before it is recognisable rather than silently rejecting the preamble.
 # A daemon too old to name a version answers the bare `ok` a 1 daemon also does.
-PROTOCOL_VERSION = 2
+# 3 is the secret on every preamble but `health`: the sandbox publishes nothing
+# against a 2 daemon, which splices whatever project a caller names.
+PROTOCOL_VERSION = 3
 HEALTH_PAYLOAD = b"health"
 HEALTH_REPLY = ("JUNIE-RELAY 1 ok %d\n" % PROTOCOL_VERSION).encode()
 MCP_CREDENTIALS_METHOD = "JunieMcpService.getBuiltInMcpServerCredentials"
@@ -137,20 +162,27 @@ def resolve_instances(explicit):
     return os.path.join(junie_home, "instances")
 
 
-def default_config_path():
-    """The config file read when no flag or environment variable names one.
+def default_config_root():
+    """The config root the rest of this repo uses, so one root holds all of it.
 
-    Under the config root the rest of this repo uses -- `junie-sbx.sh` puts its
-    read-only view and its state there -- so one root holds all of it. `HOME`
-    and the environment are the fallbacks, so a path that is set but empty still
-    resolves somewhere real.
+    `junie-sbx.sh` puts its read-only view, its state and the relay secrets
+    there. `HOME` and the environment are the fallbacks, so a path that is set
+    but empty still resolves somewhere real.
     """
-    override = os.environ.get("JUNIE_IDE_RELAYD_CONFIG")
-    if override:
-        return override
     config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
         os.environ.get("HOME") or os.path.expanduser("~"), ".config")
-    return os.path.join(config_home, "junie-sbx", CONFIG_BASENAME)
+    return os.path.join(config_home, "junie-sbx")
+
+
+def default_config_path():
+    """The config file read when no flag or environment variable names one."""
+    return os.environ.get("JUNIE_IDE_RELAYD_CONFIG") or os.path.join(
+        default_config_root(), CONFIG_BASENAME)
+
+
+def default_secrets_dir():
+    """Where the per-project secret records are read from."""
+    return os.path.join(default_config_root(), SECRETS_DIRNAME)
 
 
 def read_allow_config(path):
@@ -306,6 +338,154 @@ def port_for_digest(instances_dir, digest):
     """The RPC port the instance file naming `digest` currently advertises."""
     resolved = instance_for_digest(instances_dir, digest)
     return None if resolved is None else resolved[0]
+
+
+def project_for_digest(instances_dir, digest):
+    """The project path the instance file naming `digest` holds, or None."""
+    resolved = instance_for_digest(instances_dir, digest)
+    if resolved is None:
+        return None
+    project = resolved[1].get("project_path")
+    return project if isinstance(project, str) else None
+
+
+# What a secret, or the directory holding one, may grant beyond its owner: none.
+# `junie-sbx.sh` writes records 0600 inside a 0700 directory, and anything wider
+# hands the credential to another local user, who can then reach the project's
+# IDE -- the reach the secret exists to deny.
+GROUP_OTHER_BITS = 0o077
+# Exposed paths already reported, so the per-connection re-read does not repeat
+# itself for every relay a running sandbox opens.
+REPORTED = set()
+REPORTED_LOCK = threading.Lock()
+
+
+def exposed(path):
+    """The group and other access bits `path` carries, or None if unreadable."""
+    try:
+        return os.stat(path).st_mode & GROUP_OTHER_BITS
+    except OSError:
+        return None
+
+
+def exposed_fix(path):
+    """The `chmod` that closes `path`, as the daemon names it."""
+    return "chmod 700 it" if os.path.isdir(path) else "chmod 600 it"
+
+
+def exposed_secret_paths(secrets_dir):
+    """`secrets_dir` and the records under it that reach beyond their owner.
+
+    Both levels count. A record inside a directory others can read is exposed
+    with it, and a directory others can write is one they can add a record of
+    their own to. An absent directory is not a problem: it holds no secret, and
+    `junie-sbx.sh` creates it 0700.
+    """
+    if exposed(secrets_dir) is None:
+        return []
+    problems = [secrets_dir] if exposed(secrets_dir) else []
+    try:
+        names = sorted(os.listdir(secrets_dir))
+    except OSError:
+        return problems
+    for name in names:
+        if name.endswith(".json") and exposed(os.path.join(secrets_dir, name)):
+            problems.append(os.path.join(secrets_dir, name))
+    return problems
+
+
+def report_exposed_once(path, fix):
+    """Name an exposed path once, rather than once per connection."""
+    with REPORTED_LOCK:
+        if path in REPORTED:
+            return
+        REPORTED.add(path)
+    sys.stderr.write("junie-ide-relayd: ignoring %s: reachable beyond its owner, so its "
+                     "secret is not trusted; %s\n" % (path, fix))
+
+
+def read_secrets(secrets_dir):
+    """The provisioned records, as a list of (project path, secret).
+
+    One record per project, written by `junie-sbx.sh`: a JSON object naming the
+    project and the secret its sandbox carries. A record that does not read is
+    skipped rather than fatal -- one unreadable file must not take down a daemon
+    that serves every sandbox -- and a missing directory is no records at all,
+    which relays nothing.
+
+    A secret another local user can read is not a credential, so a record that
+    is exposed is skipped however well it parses: it would authorise the reader
+    to reach the project it names.
+    """
+    if exposed(secrets_dir):
+        report_exposed_once(secrets_dir, exposed_fix(secrets_dir))
+        return []
+    records = []
+    try:
+        names = sorted(os.listdir(secrets_dir))
+    except OSError:
+        return records
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(secrets_dir, name)
+        if exposed(path):
+            report_exposed_once(path, exposed_fix(path))
+            continue
+        try:
+            with open(path) as handle:
+                info = json.load(handle)
+            project, secret = info["project_path"], info["secret"]
+        except Exception:
+            continue
+        if isinstance(project, str) and isinstance(secret, str) and secret:
+            records.append((project, secret))
+    return records
+
+
+def authorized(secrets_dir, instances_dir, digest, secret):
+    """Whether `secret` may reach the IDE `digest` names.
+
+    A secret authorises one project and everything below it, which is the
+    containment the sandbox relay publishes under -- so an IDE opened on the
+    host later needs no new secret. A digest that resolves to no IDE authorises
+    on the secret alone: the caller answers `gone` either way, so nothing is
+    reachable and there is nothing to withhold.
+
+    Compared with `hmac.compare_digest`, so that a wrong secret cannot be
+    recovered from how long this takes.
+    """
+    presented = secret.decode("ascii", "replace")
+    roots = [project for project, known in read_secrets(secrets_dir)
+             if hmac.compare_digest(known, presented)]
+    if not roots:
+        return False
+    project = project_for_digest(instances_dir, digest)
+    if project is None:
+        return True
+    resolved = os.path.realpath(project)
+    for root in roots:
+        root = os.path.realpath(root)
+        if resolved == root or resolved.startswith(root + os.sep):
+            return True
+    return False
+
+
+def is_secret(payload):
+    text = payload.decode("ascii", "replace")
+    return len(text) == SECRET_HEX_LEN and all(c in "0123456789abcdef" for c in text)
+
+
+def split_digest_secret(payload):
+    """The (digest, secret) a preamble names, or (None, None).
+
+    The digest is returned decoded, since that is the form the instance files
+    are matched on; the secret stays bytes for `hmac.compare_digest`.
+    """
+    digest, sep, secret = payload.partition(b" ")
+    if not sep or not is_digest(digest) or not is_secret(secret):
+        return None, None
+    return digest.decode("ascii"), secret
 
 
 def mcp_port_for_digest(instances_dir, digest):
@@ -678,7 +858,7 @@ def splice_to(conn, port, digest):
     splice(conn, upstream)
 
 
-def reply_mcp_port(conn, instances_dir, payload):
+def reply_mcp_port(conn, instances_dir, digest):
     """Answer with the IDE's built-in MCP port, for a caller to bind.
 
     One line, like the health reply, so the sandbox side can tell a resolved
@@ -686,8 +866,7 @@ def reply_mcp_port(conn, instances_dir, payload):
     apart from `unknown` because the caller drops a mirror on the first two and
     keeps it on the last -- see `mcp_port_for_digest`.
     """
-    outcome, port = (mcp_port_for_digest(instances_dir, payload.decode("ascii", "replace"))
-                     if is_digest(payload) else ("unknown", None))
+    outcome, port = mcp_port_for_digest(instances_dir, digest)
     if outcome == "port":
         reply = MCP_PORT_REPLY % port
     elif outcome == "none":
@@ -833,12 +1012,7 @@ def splice_mcp(client, upstream, allow):
     upstream.close()
 
 
-def relay_mcp(conn, instances_dir, payload, allow_state):
-    digest = payload.decode("ascii", "replace")
-    if not is_digest(payload):
-        conn.close()
-        sys.stderr.write("junie-ide-relayd: rejected an MCP preamble without a project digest\n")
-        return
+def relay_mcp(conn, instances_dir, digest, allow_state):
     outcome, port = mcp_port_for_digest(instances_dir, digest)
     if outcome != "port":
         conn.close()
@@ -856,12 +1030,7 @@ def relay_mcp(conn, instances_dir, payload, allow_state):
     splice_mcp(conn, upstream, allow_state.patterns)
 
 
-def relay_rpc(conn, instances_dir, payload):
-    digest = payload.decode("ascii", "replace")
-    if not is_digest(payload):
-        conn.close()
-        sys.stderr.write("junie-ide-relayd: rejected a preamble that is neither health nor a project digest\n")
-        return
+def relay_rpc(conn, instances_dir, digest):
     port = port_for_digest(instances_dir, digest)
     if port is None:
         conn.close()
@@ -870,7 +1039,28 @@ def relay_rpc(conn, instances_dir, payload):
     splice_to(conn, port, digest)
 
 
-def handle(conn, instances_dir, allow_state):
+def authenticate(conn, secrets_dir, instances_dir, payload):
+    """The digest an authenticated preamble names, or None after closing it.
+
+    Every preamble but `health` carries the secret `junie-sbx.sh` provisioned
+    for the sandbox's project, so a connection naming another project's digest
+    is refused here rather than spliced to that project's IDE.
+    """
+    digest, secret = split_digest_secret(payload)
+    if digest is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: rejected a preamble without a project "
+                         "digest and secret\n")
+        return None
+    if not authorized(secrets_dir, instances_dir, digest, secret):
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: refused %s: no provisioned secret matches\n"
+                         % digest)
+        return None
+    return digest
+
+
+def handle(conn, instances_dir, secrets_dir, allow_state):
     payload = read_preamble(conn)
     if payload is None:
         conn.close()
@@ -888,12 +1078,18 @@ def handle(conn, instances_dir, allow_state):
         conn.close()
         return
     if payload.startswith(MCP_PORT_PREFIX):
-        reply_mcp_port(conn, instances_dir, payload[len(MCP_PORT_PREFIX):])
+        digest = authenticate(conn, secrets_dir, instances_dir, payload[len(MCP_PORT_PREFIX):])
+        if digest is not None:
+            reply_mcp_port(conn, instances_dir, digest)
         return
     if payload.startswith(MCP_PREFIX):
-        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):], allow_state)
+        digest = authenticate(conn, secrets_dir, instances_dir, payload[len(MCP_PREFIX):])
+        if digest is not None:
+            relay_mcp(conn, instances_dir, digest, allow_state)
         return
-    relay_rpc(conn, instances_dir, payload)
+    digest = authenticate(conn, secrets_dir, instances_dir, payload)
+    if digest is not None:
+        relay_rpc(conn, instances_dir, digest)
 
 
 def main(argv):
@@ -903,6 +1099,11 @@ def main(argv):
     parser.add_argument("--instances", default="",
                         help="directory holding the IDE instance files "
                              "(default: $JUNIE_HOME/instances)")
+    parser.add_argument("--secrets", default="",
+                        help="directory holding one JSON record per project, naming "
+                             "its path and the secret its sandbox carries; a preamble "
+                             "is refused unless its secret matches the project of the "
+                             "IDE it names (default: %s)" % default_secrets_dir())
     parser.add_argument("--config", default="",
                         help="TOML file naming the MCP tools the sandbox may reach, "
                              "under `allow_tools`; SIGHUP re-reads it "
@@ -931,6 +1132,21 @@ def main(argv):
         sys.stderr.write("junie-ide-relayd: no instance directory at %s\n" % instances_dir)
         return 1
 
+    secrets_dir = args.secrets or default_secrets_dir()
+    exposed_paths = exposed_secret_paths(secrets_dir)
+    if exposed_paths:
+        # Fatal rather than skipped: a secret others can read is one others
+        # hold, and a daemon that started anyway would keep a reach its operator
+        # believes it denied.
+        for path in exposed_paths:
+            sys.stderr.write("junie-ide-relayd: %s is reachable beyond its owner: %s\n"
+                             % (path, exposed_fix(path)))
+        return 1
+    if not read_secrets(secrets_dir):
+        sys.stderr.write("junie-ide-relayd: no relay secrets in %s: every relay "
+                         "connection is refused until junie-sbx.sh provisions one\n"
+                         % secrets_dir)
+
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", args.port))
@@ -945,7 +1161,8 @@ def main(argv):
             conn, _ = listener.accept()
         except OSError:
             continue
-        threading.Thread(target=handle, args=(conn, instances_dir, allow_state),
+        threading.Thread(target=handle,
+                         args=(conn, instances_dir, secrets_dir, allow_state),
                          daemon=True).start()
 
 

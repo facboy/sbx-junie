@@ -34,6 +34,14 @@ relay_span="${JUNIE_IDE_RELAY_PORT_SPAN:-20}"
 endpoint="${JUNIE_IDE_ENDPOINT:-/home/agent/.local/bin/junie-ide-relay-endpoint.py}"
 interval="${JUNIE_IDE_WATCH_INTERVAL:-10}"
 
+# The secret `junie-sbx.sh` provisioned this sandbox with, for the project it
+# holds. Every preamble carries it, and the host daemon splices a connection only
+# when it matches the project of the IDE the digest names -- which is what stops
+# one sandbox from reaching another project's IDE on the shared loopback port.
+# Handed to the endpoints through the environment so it stays out of the process
+# list. Absent, this publishes nothing: a preamble without it is refused.
+secret="${JUNIE_IDE_RELAY_SECRET:-}"
+
 watch=0
 case "${1:-}" in
 --watch) watch=1 ;;
@@ -41,6 +49,12 @@ esac
 
 command -v python3 >/dev/null 2>&1 || exit 0
 [ -f "$endpoint" ] || exit 0
+if [ -z "$secret" ]; then
+	echo "junie-ide-relay: JUNIE_IDE_RELAY_SECRET is unset, so the host daemon" \
+		"would refuse every preamble: start the sandbox through junie-sbx.sh" >&2
+	exit 0
+fi
+export JUNIE_IDE_RELAY_SECRET="$secret"
 
 # The sandbox's own project is its writable workspace mount, which `sbx create`
 # places at the host's path. A host IDE can have several projects open, one
@@ -90,12 +104,12 @@ trap 'rm -f "$relays" "$wanted"' EXIT
 # The protocol version the daemon must speak for the MCP preambles to be
 # answered. A daemon started before they were added closes those connections
 # silently, which reads as a dead port, so its absence is reported rather than
-# left to look like an IDE that is down.
-required_daemon_version=2
+# left to look like an IDE that is down. A daemon below this also lacks the
+# secret check, and would splice any project a caller names.
+required_daemon_version=3
 
 # Without the daemon there is nothing to dial, so nothing is published and the
-# sandbox is left as it was found. The version is checked separately: the RPC
-# relay works against any daemon, so an older one costs only the MCP mirror.
+# sandbox is left as it was found.
 daemon_healthy() {
 	reply=$(python3 -c '
 import socket, sys
@@ -157,10 +171,10 @@ mcp_port_for_digest() {
 import socket, sys
 try:
     conn = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)
-    conn.sendall(("JUNIE-RELAY 1 mcp-port %s\n" % sys.argv[3]).encode())
+    conn.sendall(("JUNIE-RELAY 1 mcp-port %s %s\n" % (sys.argv[3], sys.argv[4])).encode())
     sys.stdout.write(conn.recv(64).decode("ascii", "replace"))
 except Exception:
-    pass' "$ide_host" "$relay_port" "$1" 2>/dev/null)
+    pass' "$ide_host" "$relay_port" "$1" "$secret" 2>/dev/null)
 	case $reply in
 	'JUNIE-RELAY 1 mcp-port '*) reply=${reply#JUNIE-RELAY 1 mcp-port } ;;
 	*) printf 'unknown\n' ; return 0 ;;
@@ -216,7 +230,8 @@ relay_for_digest() {
 		rm -f "$record"
 
 		# setsid so the endpoint outlives this script and can be signalled as
-		# its own process group.
+		# its own process group. The secret reaches the endpoint through the
+		# exported environment, not argv, which any local process can read.
 		setsid python3 "$endpoint" --port "$candidate" --digest "$digest" \
 			--host "$ide_host" --host-port "$relay_port" \
 			--record "$record" >/dev/null 2>&1 &
@@ -285,6 +300,25 @@ relay_pass() {
 	[ -d "$host_dir" ] || return 0
 	daemon_healthy || return 0
 
+	# A daemon below the required version spliced the digest alone, so a
+	# preamble carrying a secret reaches it as a bare digest and one without a
+	# secret would reach any project a caller named. Publish nothing against it,
+	# and say why once rather than leaving it to look like an IDE that is down.
+	version=$(daemon_version)
+	case "${version:-}" in
+	''|*[!0-9]*) version=1 ;;
+	esac
+	if [ "$version" -lt "$required_daemon_version" ]; then
+		if [ "$stale_daemon_reported" = 0 ]; then
+			stale_daemon_reported=1
+			echo "junie-ide-relay: the host junie-ide-relayd speaks protocol" \
+				"$version, this relay needs $required_daemon_version:" \
+				"it has no secret check, so nothing is relayed until it is" \
+				"restarted" >&2
+		fi
+		return 0
+	fi
+
 	: >"$relays"
 	: >"$wanted"
 
@@ -328,27 +362,15 @@ relay_pass() {
 	# mirror drops the listener it left on the old one. An outcome that frees the
 	# port -- `none` or `gone` -- stops the mirror, so one is not held for the
 	# IDE's port after the IDE gave it up.
-	#
-	# A daemon too old to answer this preamble closes the connection, which is
-	# the same shape as `unknown`. Skipped instead, so that the mirror the daemon
-	# already holds is left running and the IDE relay above is unaffected.
-	version=$(daemon_version)
-	if [ -n "$version" ] && [ "$version" -ge "$required_daemon_version" ] 2>/dev/null; then
-		while IFS='	' read -r digest project; do
-			[ -n "$digest" ] || continue
-			resolution=$(mcp_port_for_digest "$digest")
-			set -- $resolution
-			case "${1:-}" in
-			port) relay_mcp_for_digest "$digest" "$2" >/dev/null || true ;;
-			none|gone) stop_mcp_mirror "$digest" ;;
-			esac
-		done <"$wanted"
-	elif [ "$stale_daemon_reported" = 0 ]; then
-		stale_daemon_reported=1
-		echo "junie-ide-relay: the host junie-ide-relayd speaks protocol" \
-			"${version:-1}, this relay needs $required_daemon_version:" \
-			"restart it for the IDE's MCP server to be relayed" >&2
-	fi
+	while IFS='	' read -r digest project; do
+		[ -n "$digest" ] || continue
+		resolution=$(mcp_port_for_digest "$digest")
+		set -- $resolution
+		case "${1:-}" in
+		port) relay_mcp_for_digest "$digest" "$2" >/dev/null || true ;;
+		none|gone) stop_mcp_mirror "$digest" ;;
+		esac
+	done <"$wanted"
 
 	# Stop endpoints for projects the sandbox no longer has open, so that a
 	# watcher left running for a long time does not accumulate bound ports. An

@@ -13,7 +13,10 @@ After=default.target
 
 [Service]
 Type=simple
-# Add --instances DIR when the instance files are not under ~/.junie/instances.
+# Add --instances DIR when the instance files are not under ~/.junie/instances,
+# and --secrets DIR when the per-project secret records are not under
+# ${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relay-secrets (junie-sbx.sh writes them
+# there, and without one every relay connection is refused).
 # The MCP tool allowlist goes in
 # ${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml (see the root README), not
 # here; SIGHUP re-reads it, and `systemctl --user reload` sends one.

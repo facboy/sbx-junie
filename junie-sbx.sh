@@ -32,6 +32,42 @@ PROJ_DIR="${SBX_STATE_DIR}/${PROJ}"
 JUNIE_HOME="${PROJ_DIR}/_junie"
 OV_ROOT="${PROJ_DIR}/overlays"
 
+# One secret per project, provisioned here and handed to the sandbox: the host
+# relay daemon splices a connection only when its preamble carries the secret
+# recorded for the project the digest resolves to. Loopback is shared with every
+# other process on the host -- other users, other sandboxes -- so without it any
+# caller could name another project's digest and reach that project's IDE.
+SECRETS_DIR="${CONFIG_HOME}/relay-secrets"
+provision_relay_secret() {
+	umask 077
+	mkdir -p "${SECRETS_DIR}"
+	# The daemon refuses to start on a secret another local user can reach, so
+	# both levels are tightened on every run: a directory an earlier run or a
+	# different umask left wider would otherwise stop the relay.
+	chmod 700 "${SECRETS_DIR}"
+	python3 - "${SECRETS_DIR}" "${PWD}" <<-'PY'
+		import hashlib, json, os, sys
+
+		secrets_dir, project = sys.argv[1], sys.argv[2]
+		path = os.path.join(secrets_dir, hashlib.md5(project.encode()).hexdigest() + ".json")
+
+		# Kept across runs: a new secret would leave a running sandbox relaying
+		# nothing until it was restarted.
+		if os.path.exists(path):
+		    os.chmod(path, 0o600)
+		    with open(path) as handle:
+		        print(json.load(handle)["secret"])
+		    raise SystemExit
+
+		secret = os.urandom(32).hex()
+		with open(path, "w") as handle:
+		    json.dump({"project_path": project, "secret": secret}, handle)
+		os.chmod(path, 0o600)
+		print(secret)
+	PY
+}
+RELAY_SECRET="$(provision_relay_secret)"
+
 init_junie_home() {
 	mkdir -p "${JUNIE_HOME}"
 
@@ -122,6 +158,7 @@ add_mount "${PNPM_MERGED}" ""
 sbx run \
     --provider "ollama" --model "deepseek-v4.1-flash:cloud" \
     --env "JUNIE_HOME=${JUNIE_HOME}" --env "USER_HOME=${HOME}" --env "USER_CONFIG_HOME=${CONFIG_HOME}" \
+    --env "JUNIE_IDE_RELAY_SECRET=${RELAY_SECRET}" \
     --env "UV_PYTHON_INSTALL_DIR=${USER_UV}/python" --env "UV_TOOL_DIR=${UV_TOOLS_MERGED}" \
     --env "UV_CACHE_DIR=${UV_CACHE_MERGED}" \
     --env "PNPM_HOME=${PNPM_MERGED}" \

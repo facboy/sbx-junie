@@ -2,15 +2,17 @@
 """Sandbox-side relay endpoint: republishes one host IDE on a loopback port.
 
 `junie-ide-relay.sh` starts one instance per host IDE. Every connection is
-opened with a one-line preamble naming that IDE's project digest and forwarded
-to the fixed host port the `junie-ide-relayd` daemon listens on; the daemon
-resolves the digest to the IDE's current ephemeral port. Nothing here needs to
-know that port, which is what lets the kit's egress allowlist name one port.
+opened with a one-line preamble naming that IDE's project digest and the secret
+this sandbox was provisioned with, and forwarded to the fixed host port the
+`junie-ide-relayd` daemon listens on; the daemon checks the secret against the
+IDE's project and resolves the digest to that IDE's current ephemeral port.
+Nothing here needs to know that port, which is what lets the kit's egress
+allowlist name one port.
 
 With `--mcp` the preamble instead asks for the IDE's built-in MCP server, which
-binds a port the IDE picks (`mcp <digest>` to the daemon). That endpoint has to
-own that exact port rather than choose one, since the CLI builds the server's
-URL itself as `http://localhost:<port>/stream`.
+binds a port the IDE picks (`mcp <digest> <secret>` to the daemon). That endpoint
+has to own that exact port rather than choose one, since the CLI builds the
+server's URL itself as `http://localhost:<port>/stream`.
 
 Written in Python rather than as a `socat SYSTEM:` one-liner: the shell pipeline
 that form needs buffers the reply until its input reaches EOF, which stalls any
@@ -23,8 +25,8 @@ import socket
 import sys
 import threading
 
-PREAMBLE_FORMAT = "JUNIE-RELAY 1 %s\n"
-MCP_PREAMBLE_FORMAT = "JUNIE-RELAY 1 mcp %s\n"
+PREAMBLE_FORMAT = "JUNIE-RELAY 1 %s %s\n"
+MCP_PREAMBLE_FORMAT = "JUNIE-RELAY 1 mcp %s %s\n"
 IDLE_TIMEOUT = 600
 
 
@@ -109,6 +111,11 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, required=True, help="loopback port to listen on")
     parser.add_argument("--digest", required=True, help="md5 of the project path this endpoint serves")
+    parser.add_argument("--secret", default=os.environ.get("JUNIE_IDE_RELAY_SECRET", ""),
+                        help="the secret this sandbox's project was provisioned with; "
+                             "the daemon splices only a preamble that carries it. Read "
+                             "from $JUNIE_IDE_RELAY_SECRET so it stays out of the "
+                             "process list")
     parser.add_argument("--mcp", action="store_true",
                         help="serve the IDE's built-in MCP server rather than its RPC")
     parser.add_argument("--host", required=True, help="host the relay daemon runs on")
@@ -119,6 +126,10 @@ def main(argv):
                              "whose port was already taken")
     args = parser.parse_args(argv)
 
+    if not args.secret:
+        sys.stderr.write("junie-ide-relay-endpoint: JUNIE_IDE_RELAY_SECRET is empty, "
+                         "so the daemon would refuse every preamble\n")
+        return 1
     try:
         listeners = bind(args.port)
     except OSError as err:
@@ -129,7 +140,7 @@ def main(argv):
     with open(args.record, "w") as record:
         record.write("%d %d\n" % (args.port, os.getpid()))
 
-    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % args.digest
+    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % (args.digest, args.secret)
     while True:
         try:
             readable, _, _ = select.select(listeners, [], [])

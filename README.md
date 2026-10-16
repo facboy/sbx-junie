@@ -91,9 +91,23 @@ python3 bin/junie-ide-relayd &
 ```
 
 It needs no arguments; `--port` and `--instances` override the fixed port and the
-`~/.junie/instances` directory it reads, and `--config` points at another allowlist file, which
+`~/.junie/instances` directory it reads, `--secrets` points at another directory of per-project
+secrets, and `--config` points at another allowlist file, which
 [MCP tools](#connecting-to-an-ide-on-the-host) below covers. The sandbox-side relay is a no-op until
 it is up.
+
+A sandbox reaches only its own project's IDE. `junie-sbx.sh` writes one secret per project under
+`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relay-secrets`, readable only by you, and hands it to the
+sandbox; the daemon splices a connection only when the secret matches the project the digest
+resolves to. Loopback is shared with every other local process, so without that check any process on
+the host — another user, another sandbox — could name another project's digest and reach that
+project's IDE. A daemon with no records relays nothing, and says so at startup.
+
+The daemon refuses to start while a record, or the directory holding them, is reachable beyond its
+owner — `chmod 600` on the records and `chmod 700` on the directory, which is what `junie-sbx.sh` and
+`setup-junie-sbx.sh` write. A secret another local user can read is not a credential, and starting
+anyway would keep a reach you believe is denied. Loosening a record while the daemon runs revokes its
+access on the next connection, without a restart.
 
 It is a foreground process, so it can be left in a terminal or put under whatever supervisor you
 already use. `systemd/user/junie-ide-relayd.service` is a sample user unit for it: copy that file
@@ -206,3 +220,6 @@ Ending the sandbox leaves it running, and it holds only a listening socket.
 Each project gets one directory under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>`:
 `_junie/` is the Junie home the sandbox writes to, and `overlays/` holds the writable uv and pnpm
 layers. Remove that directory to drop the state for a project you have finished with.
+
+Delete a project's file under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relay-secrets` to revoke that
+sandbox's access to the host's IDEs; a later run provisions a fresh secret.

@@ -56,12 +56,29 @@ override. Set that variable — don't move `JUNIE_HOME` — to relocate the file
   open on the host *after* the sandbox started appears without restarting anything.
 
 The two are joined by a one-line preamble: the sandbox endpoint opens each connection with the
-project's digest and the host daemon answers by resolving that digest against the host's instance
-files. The IDE's own ephemeral port is therefore never dialled from the sandbox and never appears in
-the allowlist — the sandbox only ever dials the daemon's fixed port. That is what makes
-`localhost:27183` in `permissions.network.allow` a real narrowing rather than an opening onto every
-host port, and it means an IDE that restarts on a new port keeps working: the daemon re-resolves the
-port on every connection.
+project's digest and the secret `junie-sbx.sh` provisioned for that project, and the host daemon
+answers by resolving that digest against the host's instance files — after checking the secret
+against the project the digest resolves to. The IDE's own ephemeral port is therefore never dialled
+from the sandbox and never appears in the allowlist — the sandbox only ever dials the daemon's fixed
+port. That is what makes `localhost:27183` in `permissions.network.allow` a real narrowing rather
+than an opening onto every host port, and it means an IDE that restarts on a new port keeps working:
+the daemon re-resolves the port on every connection.
+
+Loopback is shared with every other local process, so the port alone is no boundary: the secret is,
+and it is per project. A connection naming another project's digest — including another sandbox's —
+is refused at the daemon rather than spliced to that project's IDE, and a local process with no
+secret reaches nothing at all. Records live under
+`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relay-secrets`, one JSON file per project naming its path
+and secret, readable only by their owner; the daemon re-reads them on every connection, so a project
+provisioned after the daemon started needs no restart. A host with no records relays nothing, and
+`junie-sbx.sh` writes one for the project it is about to run — reusing an existing secret, since a
+new one would leave a running sandbox unable to relay.
+
+A secret is only a credential while it is yours alone. The daemon therefore refuses to start while a
+record, or the directory holding them, is reachable beyond its owner, naming the `chmod` that fixes
+it; it fails closed rather than starting, since a daemon that ran anyway would keep a reach you
+believe is denied. Loosening a record under a running daemon revokes that project's access on the
+next connection, and closing it again restores it, because the records are re-read per connection.
 
 Only the project the sandbox holds is published, because an IDE can have several projects open and
 writes an instance file for each. Junie selects an IDE by project path, so an instance file for any
@@ -81,10 +98,10 @@ loopback, where nothing listens — so that server reports as failed and Junie r
 notice. The same relay carries it:
 
 - The daemon resolves the port by asking the plugin, over the IDE's RPC, the same
-  `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. `JUNIE-RELAY 1 mcp <digest>`
-  splices to the server; `JUNIE-RELAY 1 mcp-port <digest>` answers with the port, `none` when the
-  plugin names no built-in server, `gone` when the IDE behind the digest is not running, or
-  `unknown` when the plugin did not answer.
+  `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. `JUNIE-RELAY 1 mcp <digest>
+  <secret>` splices to the server; `JUNIE-RELAY 1 mcp-port <digest> <secret>` answers with the port,
+  `none` when the plugin names no built-in server, `gone` when the IDE behind the digest is not
+  running, or `unknown` when the plugin did not answer.
 - `junie-ide-relay.sh` asks for that port on every pass and starts an endpoint bound to it, marked
   `--mcp` so its preamble names the server rather than the RPC. The endpoint owns the port outright,
   on `127.0.0.1` and `::1` alike: `localhost` resolves to the IPv6 loopback first, and a listener on
@@ -96,14 +113,14 @@ notice. The same relay carries it:
   drop the IDE MCP connection until the next pass rebuilt it. No allowlist entry is involved: the
   CLI's dial is to its own loopback, never through the proxy, so this is a listener to provide
   rather than a host to permit.
-- The two halves share a protocol version, and the relay script skips the mirror while the daemon
+- The two halves share a protocol version, and the relay script publishes nothing while the daemon
   answers a lower one or none at all. A daemon started before a preamble was added closes its
   connection silently, which reads as a dead IDE, so the `health` reply names the version and the
-  script reports the mismatch once rather than leaving it to look like an IDE that is down. Only the
-  mirror is skipped: the RPC relay works against any daemon, so an older one costs the IDE's MCP
-  server and nothing else. **Restart the daemon after pulling a change to it**, since a running
-  daemon keeps the preambles it started with; the sandbox's watcher then picks the work up within a
-  tick, without restarting the sandbox.
+  script reports the mismatch once rather than leaving it to look like an IDE that is down. The
+  version also covers the secret check on every other preamble: a daemon that predates it splices
+  whichever project a caller names. **Restart the daemon after pulling a change to it**, since a
+  running daemon keeps the preambles it started with; the sandbox's watcher then picks the work up
+  within a tick, without restarting the sandbox.
 - The MCP exchange is parsed rather than spliced, so the daemon can hold the sandbox to an
   allowlist of tools. A tool the list does not name is removed from a `tools/list` reply and refused
   on `tools/call` from the daemon itself, so the IDE never sees the call: that is what keeps a tool a

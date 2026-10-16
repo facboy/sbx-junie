@@ -17,6 +17,13 @@ fi
 
 mkdir -p "${CONFIG_HOME}/sbx-state"
 
+# The per-project relay secrets `junie-sbx.sh` writes and the host relay daemon
+# reads. Only the owner may read them: a secret is what authorises a sandbox to
+# reach its own project's IDE, and every other local process can dial the relay
+# port. The daemon refuses to start while either level is wider than this.
+mkdir -p -m 700 "${CONFIG_HOME}/relay-secrets"
+chmod 700 "${CONFIG_HOME}/relay-secrets"
+
 # The per-project overlays that give the sandbox a writable uv cache and pnpm
 # store over your read-only host ones are mounted at every run, by either
 # fuse-overlayfs or sudo. Report it here, with the other prerequisites.
