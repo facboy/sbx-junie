@@ -48,7 +48,8 @@ The host paths it passes:
 - `~/.junie/instances` read-only, which is what tells the sandbox which projects the host has open
   ([Connecting to an IDE on the host](#connecting-to-an-ide-on-the-host)),
 - the read-only view of `~/.junie`, from which `junie-sbx.sh` links `AGENTS.md`, `docs/`, and
-  `tools/` into the Junie home the sandbox writes to,
+  `tools/` into the Junie home the sandbox writes to, and `junie-init.sh` links the same three
+  inside the sandbox's own `~/.junie`, so a tool reads them at `~/.junie/tools`,
 - `~/.local/share/junie` and `~/.local/bin`, where the host's CLI lives,
 - the host's uv and pnpm trees, read-only, and a writable overlay over each cache
   and the pnpm store ([Your uv and pnpm environments](#your-uv-and-pnpm-environments)), each of
@@ -233,7 +234,13 @@ The sandbox's watcher picks the work up within a tick, without restarting the sa
 ## Customization
 
 Junie's instructions come from the host's Junie home, which is mounted read-only: edit
-`~/.junie/AGENTS.md`, and the next sandbox start picks it up.
+`~/.junie/AGENTS.md` on the host, and the next sandbox start picks it up.
+
+Inside the sandbox, `~/.junie` is the CLI's own directory, not the Junie home: the CLI resolves its
+instance files from `user.home/.junie/instances` and never consults `JUNIE_HOME`, so `junie-init.sh`
+links `AGENTS.md`, `docs/` and `tools/` beside that `instances/` rather than moving the directory.
+That is what makes the read-only view reachable at the paths a tool expects — including
+`~/.junie/tools/check_doc_prose.py`.
 
 ## Cleanup
 

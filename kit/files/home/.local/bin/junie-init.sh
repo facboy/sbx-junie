@@ -6,6 +6,16 @@ mkdir -p ~/.local/share/
 mkdir -p ~/.local/bin/
 /usr/bin/ln -sf "${USER_HOME}/.local/bin/junie" ~/.local/bin/
 
+# Junie's instances do not follow JUNIE_HOME -- the CLI resolves them from
+# user.home/.junie/instances -- so ~/.junie is a real directory the relay fills,
+# and the read-only view is linked beside them rather than that directory moved.
+if [ -n "${JUNIE_HOME:-}" ]; then
+	mkdir -p ~/.junie
+	for name in AGENTS.md docs tools; do
+		/usr/bin/ln -sfn "${JUNIE_HOME}/${name}" ~/.junie/
+	done
+fi
+
 # The host trees are mounted read-only at their own paths, so each of these is
 # the host's own tool. ~/.local/bin leads PATH, which is what makes the host's
 # uv, pnpm and node the ones that run. Each link is made only if the binary
