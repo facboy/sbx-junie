@@ -4,7 +4,7 @@ set -eu
 
 SBX_KIT="${HOME}/git/sbx-junie/kit"
 
-CONFIG_HOME="${XDG_CONFIG_HOME-${HOME}/.config}/junie-sbx"
+CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}/junie-sbx"
 SBX_STATE_DIR="${CONFIG_HOME}/sbx-state"
 DOT_JUNIE_RO="${CONFIG_HOME}/junie_ro/_junie"
 JUNIE_SHARE="${HOME}/.local/share/junie"

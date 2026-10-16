@@ -2,7 +2,7 @@
 
 set -eu
 
-CONFIG_HOME="${XDG_CONFIG_HOME-${HOME}/.config}/junie-sbx"
+CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}/junie-sbx"
 JUNIE_RO="${CONFIG_HOME}/junie_ro"
 
 mkdir -p "${JUNIE_RO}/_junie"
