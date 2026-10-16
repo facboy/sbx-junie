@@ -120,6 +120,10 @@ A `Connected` state names the IDE, its project, and the plugin version. `Missing
 plugin is not installed in the IDE you have open; `Unsupported` means the IDE is older than
 `2026.1`, which is Junie's floor for this integration (see upstream's
 [JetBrains IDE integration](https://junie.jetbrains.com/docs/junie-cli-jetbrains-ide-integration.html)).
+`AuthRequired`, shown as `Unauthorized`, means the plugin refused the token in the instance file the
+relay published — that file named a different IDE from the one the relay routes to. The relay
+rebuilds the file from the host's instance files on every pass, so it recovers on its own, without a
+sandbox restart.
 
 The IDE's project must be the same project the sandbox has mounted, and the CLI must run from that
 project or a child directory — Junie matches the two on path, so a sandbox holding the repository at

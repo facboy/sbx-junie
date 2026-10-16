@@ -379,19 +379,32 @@ relay_pass() {
 		        digest, project, relay_port, relay_pid = line.split("\t", 3)
 		        served[digest] = (int(relay_port), int(relay_pid))
 
-		# Index the instance files to publish by the digest that names them.
-		# Keying by digest rather than by path leaves one file per project even
-		# when the host has the same project open in two IDEs.
-		current = {}
+		# Index the file to publish per digest, taking the one the host daemon
+		# resolves that digest to -- the newest file naming the project, tie-broken
+		# by port -- since that is the IDE the connection is spliced to. The CLI
+		# authenticates with the token published here, so a token from any other
+		# file is one that IDE refuses: an IDE with the project open twice is what
+		# produced the 401 this avoids. Keying by digest rather than by path still
+		# leaves one file per project, even when the host has it open in two IDEs.
+		newest = {}
 		for source in sorted(glob.glob(os.path.join(host_dir, "*.json"))):
 		    try:
 		        with open(source) as handle:
 		            info = json.load(handle)
+		        port = int(info["port"])
+		        if not 1 <= port <= 65535:
+		            continue
+		        digest = hashlib.md5(info["project_path"].encode()).hexdigest()
 		    except Exception:
 		        continue
-		    digest = hashlib.md5(info["project_path"].encode()).hexdigest()
 		    if digest not in served:
 		        continue
+		    stamp = (os.stat(source).st_mtime, port)
+		    if digest not in newest or stamp > newest[digest][0]:
+		        newest[digest] = (stamp, info)
+
+		current = {}
+		for digest, (_, info) in newest.items():
 		    info["port"], info["pid"] = served[digest]
 		    current[digest] = info
 

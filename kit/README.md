@@ -67,6 +67,12 @@ Only the project the sandbox holds is published, because an IDE can have several
 writes an instance file for each. Junie selects an IDE by project path, so an instance file for any
 other project would offer it an IDE with a different project open.
 
+The token in that published file is taken from whichever file the daemon resolves the project to,
+so the two always name the same IDE. With the project open in two IDEs there is one file each, and
+the daemon resolves each digest to the newest of them; publishing from any other would hand the CLI
+a token that IDE does not know, which the plugin answers as `Invalid or missing token` and the CLI
+reports as `AuthRequired`/`Unauthorized`.
+
 ### The IDE's built-in MCP server
 
 The plugin also serves the IDE's own MCP tools, on a port of its choosing, and hands that port to the
