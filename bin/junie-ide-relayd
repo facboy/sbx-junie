@@ -18,6 +18,15 @@ MCP port and splices to it, and `mcp-port <digest>` answers with that port for a
 sandbox-side endpoint to bind. Both are resolved per connection, since the port
 moves when the IDE restarts.
 
+The MCP exchange is parsed rather than spliced byte for byte, so that only the
+tools the sandbox needs reach the host: see `splice_mcp`. A tool the allowlist
+does not name is removed from `tools/list` and refused on `tools/call`, so a tool
+a later IDE build adds arrives unreviewed rather than unrestricted. The RPC
+relay above is left a plain splice.
+
+    bin/junie-ide-relayd [--port PORT] [--instances DIR] [--allow-tool NAME]...
+                          [--no-tool-filter]
+
 `mcp-port` answers `none` when the plugin reports no built-in server, and `gone`
 when the IDE behind the digest is no longer running. The sandbox closes a mirror
 for either, so a port the IDE gave up is not held open, but keeps one for
@@ -63,6 +72,55 @@ MCP_PORT_GONE = b"JUNIE-RELAY 1 mcp-port gone\n"
 # The plugin did not answer, so the port is not known to have moved. The sandbox
 # keeps its mirror on this, since a momentary failure answers the same way.
 MCP_PORT_UNKNOWN = b"JUNIE-RELAY 1 mcp-port unknown\n"
+
+# What the sandbox may reach through the IDE's built-in MCP server, as patterns.
+# Anything matching nothing here is removed from `tools/list` and refused on
+# `tools/call`, so a tool a later IDE build adds cannot arrive unreviewed. A
+# pattern is an exact tool name, or a name ending in `*`, which matches every
+# tool whose name begins with it.
+#
+# Nothing that runs a command or code on the host is listed:
+# `execute_terminal_command` runs a shell command there, and
+# `execute_run_configuration` runs a run point the sandbox creates for itself by
+# writing an executable script into the project it shares with the host; both
+# are host command execution. `execute_code_on_kernel` and `run_notebook_cell`
+# run code in a Jupyter kernel, and `execute_sql_query` runs a statement against
+# a configured database. Add one back with `--allow-tool` when work needs it.
+#
+# `execute_tool` resolves a tool by name from its own argument, so it is listed
+# to keep the IDE's own routing working, and a call through it is checked
+# against these same patterns; see `refused_tool`. Exact names are preferred
+# over a `*` pattern where a prefix could reach a tool that was not reviewed.
+DEFAULT_ALLOW_TOOLS = (
+    "analyze_calls",
+    "apply_patch",
+    "build_project",
+    "cancel_sql_query",
+    "configure_python_interpreter",
+    "create_*",
+    "edit_*",
+    "execute_tool",
+    "fetch_query_result",
+    "get_*",
+    "git_status",
+    "interrupt_notebook",
+    "introspect_schema",
+    "kill_notebook",
+    "lint_files",
+    "list_*",
+    "open_file_in_editor",
+    "preview_table_data",
+    "read_*",
+    "reformat_file",
+    "rename_refactoring",
+    "search_*",
+    "test_database_connection",
+    "wait_cell_execution",
+)
+DISPATCHER_TOOL = "execute_tool"
+TOOL_LIST_MARKER = "Available tools: "
+REFUSED_REPLY = ('{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,'
+                 '"message":"Tool \'%s\' is not available"}}')
 MAX_PREAMBLE = 256
 IDLE_TIMEOUT = 600
 
@@ -213,6 +271,262 @@ def mcp_port_for_digest(instances_dir, digest):
     return "port", port
 
 
+class HttpConnection:
+    """A socket and the bytes already read past the last message boundary.
+
+    The message boundary matters because the payload either side of it is
+    opaque: a buffered reader that ran past it would hand the next message's
+    first line to the caller as if it were body.
+    """
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buffer = b""
+
+    def fill(self):
+        try:
+            data = self.sock.recv(65536)
+        except OSError:
+            return False
+        if not data:
+            return False
+        self.buffer += data
+        return True
+
+    def read_head(self):
+        """The next head, its closing CRLFCRLF included, or None at EOF."""
+        while b"\r\n\r\n" not in self.buffer:
+            if not self.fill():
+                return None
+        head, _, rest = self.buffer.partition(b"\r\n\r\n")
+        self.buffer = rest
+        return head + b"\r\n\r\n"
+
+    def read_line(self):
+        while b"\r\n" not in self.buffer:
+            if not self.fill():
+                return None
+        line, _, rest = self.buffer.partition(b"\r\n")
+        self.buffer = rest
+        return line
+
+    def read_exact(self, count):
+        while len(self.buffer) < count and self.fill():
+            pass
+        data, self.buffer = self.buffer[:count], self.buffer[count:]
+        return data
+
+    def read_chunked(self):
+        """A chunked body as the raw bytes that frame it, or None if malformed."""
+        raw = []
+        while True:
+            line = self.read_line()
+            if line is None:
+                return None
+            raw.append(line + b"\r\n")
+            try:
+                size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+            except ValueError:
+                return None
+            if size == 0:
+                while True:
+                    trailer = self.read_line()
+                    if trailer in (None, b""):
+                        break
+                    raw.append(trailer + b"\r\n")
+                raw.append(b"\r\n")
+                return b"".join(raw)
+            raw.append(self.read_exact(size))
+            raw.append(self.read_exact(2))
+
+
+def parse_head(head):
+    """The start line of a message head, and its lower-cased headers."""
+    lines = head.split(b"\r\n")
+    headers = {}
+    for line in lines[1:]:
+        name, sep, value = line.partition(b":")
+        if sep:
+            headers[name.strip().lower()] = value.strip()
+    return lines[0], headers
+
+
+def read_body(conn, headers):
+    """The next body as raw bytes, or None when its framing is unusable.
+
+    Returns empty when the message declares no body, which is the ordinary
+    shape of a request that carries none.
+    """
+    if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+        return conn.read_chunked()
+    length = headers.get(b"content-length")
+    if length is None:
+        return b""
+    try:
+        return conn.read_exact(int(length))
+    except ValueError:
+        return None
+
+
+def is_bounded(head, headers):
+    """Whether a response ends by itself, rather than streaming until close.
+
+    `GET /stream` is the session's server-to-client channel and declares no
+    length: it stays open for the life of the session, so the daemon has to
+    pass it through as it arrives instead of reading it to an end.
+    """
+    if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+        return True
+    if b"content-length" in headers:
+        return True
+    return header_status(head) in (204, 304)
+
+
+def header_status(head):
+    parts = head.split(b" ", 2)
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def allowed_tool(name, allow):
+    """Whether `name` matches a pattern in `allow`.
+
+    A pattern is an exact tool name, or a name ending in `*` that matches every
+    tool whose name begins with it.
+    """
+    if not isinstance(name, str):
+        return False
+    for pattern in allow:
+        if pattern.endswith("*"):
+            if name.startswith(pattern[:-1]):
+                return True
+        elif name == pattern:
+            return True
+    return False
+
+
+def refused_tool(params, allow):
+    """The tool a `tools/call` reaches that `allow` does not cover, or None.
+
+    A name the allowlist does not cover is refused, which is what stops a tool a
+    later IDE build adds from arriving unreviewed. A call through `execute_tool`
+    names its target inside its own argument, so that argument is checked as
+    well: the tool name has to appear there literally for the dispatcher to
+    resolve it, which is what makes its first word enough. A dispatcher call
+    whose command cannot be read names nothing to check, and is refused.
+    """
+    name = params.get("name")
+    if not isinstance(name, str):
+        return DISPATCHER_TOOL
+    if not allowed_tool(name, allow):
+        return name
+    if name != DISPATCHER_TOOL:
+        return None
+    command = (params.get("arguments") or {}).get("command")
+    if not isinstance(command, str):
+        return DISPATCHER_TOOL
+    words = command.strip().split()
+    if words and allowed_tool(words[0], allow):
+        return None
+    return words[0] if words else DISPATCHER_TOOL
+
+
+def scrub_tool_list(text, allow):
+    """The dispatch error's own tool listing, with unlisted names removed."""
+    index = text.find(TOOL_LIST_MARKER)
+    if index < 0:
+        return text
+    head = text[:index + len(TOOL_LIST_MARKER)]
+    names = [name.strip() for name in text[len(head):].split(",")]
+    return head + ", ".join(name for name in names if allowed_tool(name, allow))
+
+
+def scrub_payload(payload, allow):
+    """Remove unlisted tools from a `tools/list` result and a dispatch listing.
+
+    Returns True when the payload changed and so has to be re-framed.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
+        return False
+    result = payload["result"]
+    changed = False
+    tools = result.get("tools")
+    if isinstance(tools, list):
+        kept = [tool for tool in tools
+                if isinstance(tool, dict) and allowed_tool(tool.get("name"), allow)]
+        if len(kept) != len(tools):
+            result["tools"] = kept
+            changed = True
+    for item in result.get("content") or []:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            text = scrub_tool_list(item["text"], allow)
+            if text != item["text"]:
+                item["text"] = text
+                changed = True
+    return changed
+
+
+def rebuild_head(head, length):
+    """A message head declaring `length` bytes, its framing replaced."""
+    lines = head.split(b"\r\n")
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if not line:
+            continue
+        name = line.partition(b":")[0].strip().lower()
+        if name in (b"content-length", b"transfer-encoding"):
+            continue
+        kept.append(line)
+    kept.append(b"Content-Length: %d" % length)
+    return b"\r\n".join(kept) + b"\r\n\r\n"
+
+
+def decode_chunked(raw):
+    """The payload a chunked body frames, or None when it is malformed."""
+    payload = bytearray()
+    rest = raw
+    while True:
+        line, _, rest = rest.partition(b"\r\n")
+        try:
+            size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+        except ValueError:
+            return None
+        if size == 0:
+            return bytes(payload)
+        if len(rest) < size + 2:
+            return None
+        payload += rest[:size]
+        rest = rest[size + 2:]
+
+
+def filtered_response(head, body, allow):
+    """A response with the tools outside `allow` removed, or None to pass it.
+
+    Only a JSON body is rewritten. An event-stream body carries its payload on
+    `data:` lines, and a listing on one is left alone: the IDE answers a
+    `tools/list` on JSON -- it refuses a request that accepts events alone -- and
+    a client that did ask for events still has its calls refused.
+    """
+    _, headers = parse_head(head)
+    if b"json" not in headers.get(b"content-type", b"").lower():
+        return None
+    content = body
+    if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+        content = decode_chunked(body)
+        if content is None:
+            return None
+    try:
+        payload = json.loads(content)
+    except ValueError:
+        return None
+    if not scrub_payload(payload, allow):
+        return None
+    encoded = json.dumps(payload).encode()
+    return rebuild_head(head, len(encoded)), encoded
+
+
 def splice(client, upstream):
     """Relay both directions until each has seen EOF from the other.
 
@@ -284,7 +598,133 @@ def reply_mcp_port(conn, instances_dir, payload):
     conn.close()
 
 
-def relay_mcp(conn, instances_dir, payload):
+def splice_mcp(client, upstream, allow):
+    """Splice the MCP exchange with everything outside `allow` removed.
+
+    A byte splice cannot do this: the tool to remove is named inside a JSON
+    body, in the `tools/list` reply and in the `tools/call` request. So both
+    directions are framed as HTTP here, and a request naming a tool the
+    allowlist does not cover is answered by the daemon instead of being
+    forwarded -- the IDE is never asked to run it.
+
+    One thread per direction, because the response side is not driven by the
+    request side's read loop: the session's `GET /stream` response stays open
+    while the client sends nothing on it.
+    """
+    client_conn, upstream_conn = HttpConnection(client), HttpConnection(upstream)
+    write_lock = threading.Lock()
+    session = {}
+
+    def refuse(message):
+        # Only a tool call is checked: `initialize`, `tools/list` and the
+        # notifications name no tool, and the reply to `tools/list` is filtered
+        # on the way back instead.
+        if message.get("method") != "tools/call":
+            return None
+        request_id = message.get("id")
+        if request_id is None:
+            # A notification has no reply, and the IDE will not be sent the
+            # call either, so there is nothing to answer.
+            return None
+        name = refused_tool(message.get("params") or {}, allow)
+        if name is None:
+            return None
+        body = (REFUSED_REPLY % (json.dumps(request_id), name)).encode()
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        if session.get("id"):
+            head += b"mcp-session-id: " + session["id"].encode() + b"\r\n"
+        return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+    def forward_requests():
+        while True:
+            head = client_conn.read_head()
+            if head is None:
+                try:
+                    upstream.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                return
+            _, headers = parse_head(head)
+            body = read_body(client_conn, headers)
+            if body is None:
+                return
+            if body and allow:
+                try:
+                    message = json.loads(body)
+                except ValueError:
+                    message = None
+                if isinstance(message, dict) and isinstance(message.get("method"), str):
+                    refusal = refuse(message)
+                    if refusal is not None:
+                        with write_lock:
+                            try:
+                                client.sendall(refusal)
+                            except OSError:
+                                pass
+                        continue
+            try:
+                upstream.sendall(head + body)
+            except OSError:
+                return
+
+    def forward_responses():
+        try:
+            while True:
+                head = upstream_conn.read_head()
+                if head is None:
+                    break
+                _, headers = parse_head(head)
+                session_id = headers.get(b"mcp-session-id")
+                if session_id:
+                    session["id"] = session_id.decode("ascii", "replace")
+                if not is_bounded(head, headers):
+                    # A stream is passed through as it arrives, and its first
+                    # bytes may already sit past the message boundary.
+                    with write_lock:
+                        client.sendall(head)
+                        if upstream_conn.buffer:
+                            client.sendall(upstream_conn.buffer)
+                            upstream_conn.buffer = b""
+                        while True:
+                            try:
+                                data = upstream.recv(65536)
+                            except OSError:
+                                break
+                            if not data:
+                                break
+                            try:
+                                client.sendall(data)
+                            except OSError:
+                                break
+                    break
+                body = read_body(upstream_conn, headers)
+                if body is None:
+                    break
+                replaced = filtered_response(head, body, allow) if allow else None
+                with write_lock:
+                    client.sendall(head + body if replaced is None else b"".join(replaced))
+        except OSError:
+            pass
+        finally:
+            # The IDE has stopped answering, so the client is told the same way
+            # a half-close tells it: its own write side stays open, so a request
+            # already in flight is not cut off mid-send.
+            try:
+                client.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    threads = [threading.Thread(target=forward_requests, daemon=True),
+               threading.Thread(target=forward_responses, daemon=True)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    client.close()
+    upstream.close()
+
+
+def relay_mcp(conn, instances_dir, payload, allow):
     digest = payload.decode("ascii", "replace")
     if not is_digest(payload):
         conn.close()
@@ -296,7 +736,15 @@ def relay_mcp(conn, instances_dir, payload):
         sys.stderr.write("junie-ide-relayd: no built-in MCP server for digest %s (%s)\n"
                          % (digest, outcome))
         return
-    splice_to(conn, port, digest)
+    try:
+        upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
+    except OSError as err:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: %s: %s\n" % (digest, err))
+        return
+    upstream.settimeout(IDLE_TIMEOUT)
+    conn.settimeout(IDLE_TIMEOUT)
+    splice_mcp(conn, upstream, allow)
 
 
 def relay_rpc(conn, instances_dir, payload):
@@ -313,7 +761,7 @@ def relay_rpc(conn, instances_dir, payload):
     splice_to(conn, port, digest)
 
 
-def handle(conn, instances_dir):
+def handle(conn, instances_dir, allow):
     payload = read_preamble(conn)
     if payload is None:
         conn.close()
@@ -334,7 +782,7 @@ def handle(conn, instances_dir):
         reply_mcp_port(conn, instances_dir, payload[len(MCP_PORT_PREFIX):])
         return
     if payload.startswith(MCP_PREFIX):
-        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):])
+        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):], allow)
         return
     relay_rpc(conn, instances_dir, payload)
 
@@ -346,7 +794,20 @@ def main(argv):
     parser.add_argument("--instances", default="",
                         help="directory holding the IDE instance files "
                              "(default: $JUNIE_HOME/instances)")
+    parser.add_argument("--allow-tool", action="append", default=None, metavar="NAME",
+                        help="an MCP tool the sandbox may reach, as an exact name or a "
+                             "name ending in '*'; repeatable, replacing the defaults "
+                             "(default: %s)" % ", ".join(DEFAULT_ALLOW_TOOLS))
+    parser.add_argument("--no-tool-filter", action="store_true",
+                        help="relay the IDE's built-in MCP server unfiltered")
     args = parser.parse_args(argv)
+
+    if args.no_tool_filter:
+        allow = None
+    elif args.allow_tool is None:
+        allow = DEFAULT_ALLOW_TOOLS
+    else:
+        allow = tuple(args.allow_tool)
 
     instances_dir = resolve_instances(args.instances)
     if not os.path.isdir(instances_dir):
@@ -359,13 +820,16 @@ def main(argv):
     listener.listen(64)
     sys.stderr.write("junie-ide-relayd: listening on 127.0.0.1:%d, instances %s\n"
                      % (args.port, instances_dir))
+    if allow:
+        sys.stderr.write("junie-ide-relayd: allowing MCP tools %s\n"
+                         % ", ".join(allow))
 
     while True:
         try:
             conn, _ = listener.accept()
         except OSError:
             continue
-        threading.Thread(target=handle, args=(conn, instances_dir), daemon=True).start()
+        threading.Thread(target=handle, args=(conn, instances_dir, allow), daemon=True).start()
 
 
 if __name__ == "__main__":

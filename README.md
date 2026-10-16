@@ -140,6 +140,16 @@ connected rather than failed in `/mcp`, and the startup MCP setup notice goes aw
 holds a mirror only while the daemon reports the IDE's port, and frees it when the IDE goes away or
 names no built-in server, so a port the IDE gave up is not held open.
 
+Those tools reach the host, so the daemon allowlists them rather than passing the IDE's list
+through: a tool the allowlist does not name is removed from `tools/list` and refused before the IDE
+sees the call, which is what keeps a tool a later IDE build adds from arriving unreviewed. Nothing
+that runs a command or code on the host is named — `execute_terminal_command` runs a shell command
+there, `execute_run_configuration` runs a run point the sandbox creates for itself by writing an
+executable script into the project it shares with the host, `execute_code_on_kernel` and
+`run_notebook_cell` run code in a kernel, and `execute_sql_query` runs a statement against a
+database. `--allow-tool NAME` (an exact name, or a name ending in `*`) replaces the list, and
+`--no-tool-filter` relays it unfiltered.
+
 The two halves speak a versioned protocol, and the sandbox publishes nothing against a daemon older
 than it needs — a daemon started before one of its preambles closed its connection silently, which
 reads as a dead IDE. So restart the daemon after pulling a change to it:

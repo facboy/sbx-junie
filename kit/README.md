@@ -104,6 +104,19 @@ notice. The same relay carries it:
   server and nothing else. **Restart the daemon after pulling a change to it**, since a running
   daemon keeps the preambles it started with; the sandbox's watcher then picks the work up within a
   tick, without restarting the sandbox.
+- The MCP exchange is parsed rather than spliced, so the daemon can hold the sandbox to an
+  allowlist of tools. A tool the list does not name is removed from a `tools/list` reply and refused
+  on `tools/call` from the daemon itself, so the IDE never sees the call: that is what keeps a tool a
+  later IDE build adds from arriving unreviewed. Nothing that runs a command or code on the host is
+  named — `execute_terminal_command` runs a shell command there, `execute_run_configuration` runs a
+  run point the sandbox creates for itself by writing an executable script into the project it
+  shares with the host, `execute_code_on_kernel` and `run_notebook_cell` run code in a kernel, and
+  `execute_sql_query` runs a statement against a database. `execute_tool` resolves a tool by name
+  from its own argument, so it is allowlisted to keep the routing working and a call through it is
+  checked against the same list. `--allow-tool NAME` (exact, or a name ending in `*`) replaces the
+  defaults and `--no-tool-filter` relays unfiltered. Both the request path and the session's
+  `GET /stream` are framed; a streamed reply is passed through as it arrives, since it stays open
+  for the life of the session.
 
 Starting the daemon, running the sandbox, and checking `/ide` are in the
 [root README](../README.md#connecting-to-an-ide-on-the-host).
