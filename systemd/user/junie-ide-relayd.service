@@ -14,9 +14,15 @@ After=default.target
 [Service]
 Type=simple
 # Add --instances DIR when the instance files are not under ~/.junie/instances.
+# The MCP tool allowlist goes in
+# ${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml (see the root README), not
+# here; SIGHUP re-reads it, and `systemctl --user reload` sends one.
 # Leave the port alone: the kit allowlists localhost:27183, the default, and the
 # sandbox reaches the daemon on no other.
 ExecStart=/usr/bin/env python3 %h/git/sbx-junie/bin/junie-ide-relayd
+# Re-reads the allowlist without restarting, so a running sandbox keeps its
+# connections: `systemctl --user reload junie-ide-relayd`.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 

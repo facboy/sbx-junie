@@ -113,10 +113,16 @@ notice. The same relay carries it:
   shares with the host, `execute_code_on_kernel` and `run_notebook_cell` run code in a kernel, and
   `execute_sql_query` runs a statement against a database. `execute_tool` resolves a tool by name
   from its own argument, so it is allowlisted to keep the routing working and a call through it is
-  checked against the same list. `--allow-tool NAME` (exact, or a name ending in `*`) replaces the
-  defaults and `--no-tool-filter` relays unfiltered. Both the request path and the session's
+  checked against the same list. Both the request path and the session's
   `GET /stream` are framed; a streamed reply is passed through as it arrives, since it stays open
   for the life of the session.
+- The list itself comes from a TOML config file at
+  `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — one host-wide file, since the daemon
+  serves every sandbox — written as `allow_tools = ["apply_patch", "get_*"]`. The daemon needs no
+  dependency beyond `python3`, and an absent file leaves the built-in list in force. `--config PATH`
+  and `$JUNIE_IDE_RELAYD_CONFIG` point elsewhere, `--allow-tool NAME` (exact, or a name ending in
+  `*`) overrides the file, and `--no-tool-filter` relays unfiltered. `SIGHUP` re-reads it, so a
+  change needs no restart; see [the host steps](../README.md#connecting-to-an-ide-on-the-host).
 
 Starting the daemon, running the sandbox, and checking `/ide` are in the
 [root README](../README.md#connecting-to-an-ide-on-the-host).

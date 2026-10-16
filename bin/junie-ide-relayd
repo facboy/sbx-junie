@@ -24,8 +24,17 @@ does not name is removed from `tools/list` and refused on `tools/call`, so a too
 a later IDE build adds arrives unreviewed rather than unrestricted. The RPC
 relay above is left a plain splice.
 
-    bin/junie-ide-relayd [--port PORT] [--instances DIR] [--allow-tool NAME]...
-                          [--no-tool-filter]
+The tool allowlist comes from `DEFAULT_ALLOW_TOOLS` unless a TOML config file or
+the flags below name another:
+
+    allow_tools = ["apply_patch", "get_*"]
+
+It is read from `${XDG_CONFIG_HOME:-$HOME/.config}/junie-sbx/relayd.toml`, or
+`$JUNIE_IDE_RELAYD_CONFIG`, or `--config PATH`, each overriding the one before.
+`SIGHUP` re-reads it, so a change needs no restart.
+
+    bin/junie-ide-relayd [--port PORT] [--instances DIR] [--config PATH]
+                          [--allow-tool NAME]... [--no-tool-filter]
 
 `mcp-port` answers `none` when the plugin reports no built-in server, and `gone`
 when the IDE behind the digest is no longer running. The sandbox closes a mirror
@@ -48,11 +57,14 @@ import http.client
 import json
 import os
 import select
+import signal
 import socket
 import sys
 import threading
+import tomllib
 
 DEFAULT_PORT = 27183
+CONFIG_BASENAME = "relayd.toml"
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
 # Bumped when a preamble the sandbox side depends on is added, so that a daemon
 # started before it is recognisable rather than silently rejecting the preamble.
@@ -130,6 +142,106 @@ def resolve_instances(explicit):
         return explicit
     junie_home = os.environ.get("JUNIE_HOME") or os.path.join(os.path.expanduser("~"), ".junie")
     return os.path.join(junie_home, "instances")
+
+
+def default_config_path():
+    """The config file read when no flag or environment variable names one.
+
+    Under the config root the rest of this repo uses -- `junie-sbx.sh` puts its
+    read-only view and its state there -- so one root holds all of it. `HOME`
+    and the environment are the fallbacks, so a path that is set but empty still
+    resolves somewhere real.
+    """
+    override = os.environ.get("JUNIE_IDE_RELAYD_CONFIG")
+    if override:
+        return override
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.environ.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "junie-sbx", CONFIG_BASENAME)
+
+
+def read_allow_config(path):
+    """The `allow_tools` list a TOML file names, or None when it names none.
+
+    A file that does not exist names none, since it is only one step in a
+    search. Anything else wrong with it raises: an unreadable file would
+    otherwise leave the built-in list in force while looking like a narrowing
+    that had loaded.
+    """
+    try:
+        with open(path, "rb") as handle:
+            document = tomllib.load(handle)
+    except FileNotFoundError:
+        return None
+    patterns = document.get("allow_tools")
+    if patterns is None:
+        return None
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        raise ValueError("allow_tools must be a list of tool-name strings")
+    return tuple(patterns)
+
+
+def resolve_allow(config_path, allow_tool, no_tool_filter):
+    """The (patterns, source) in force: the flags first, then the file, then the
+    built-in list. `patterns` is None when the filter is off.
+    """
+    if no_tool_filter:
+        return None, "--no-tool-filter"
+    if allow_tool is not None:
+        return tuple(allow_tool), "--allow-tool"
+    patterns = read_allow_config(config_path)
+    if patterns is not None:
+        return patterns, config_path
+    return DEFAULT_ALLOW_TOOLS, "built-in defaults"
+
+
+def report_allow(patterns, source):
+    if patterns is None:
+        sys.stderr.write("junie-ide-relayd: MCP tools are unfiltered (%s)\n" % source)
+        return
+    named = ", ".join(patterns) if patterns else "none -- every call is refused"
+    sys.stderr.write("junie-ide-relayd: allowing MCP tools (%s): %s\n" % (source, named))
+
+
+class AllowState:
+    """The allowlist in force, re-resolved on `SIGHUP`.
+
+    Read once per MCP exchange rather than once per process, so a reload reaches
+    the exchanges that start afterwards and leaves the ones already open alone.
+    The flags are kept because a reload applies the same precedence: a daemon
+    started with `--allow-tool` or `--no-tool-filter` is not reconfigured by a
+    file, whichever way it was started.
+    """
+
+    def __init__(self, config_path, allow_tool, no_tool_filter):
+        self.config_path = config_path
+        self.allow_tool = allow_tool
+        self.no_tool_filter = no_tool_filter
+        self.patterns, self.source = resolve_allow(config_path, allow_tool, no_tool_filter)
+
+    def reload(self):
+        """Re-read the config, or keep the current list when that fails.
+
+        A failed reload leaves the daemon as it was: a half-written file is easy
+        to `SIGHUP` into, and refusing every tool or exiting would both be worse
+        than the list already in force.
+        """
+        try:
+            patterns, source = resolve_allow(self.config_path, self.allow_tool,
+                                             self.no_tool_filter)
+        except (OSError, ValueError) as err:
+            sys.stderr.write("junie-ide-relayd: keeping the current allowlist: %s: %s\n"
+                             % (self.config_path, err))
+            return
+        self.patterns, self.source = patterns, source
+        report_allow(self.patterns, self.source)
+
+
+def install_reload_handler(state):
+    """Reload the allowlist on `SIGHUP`, where the platform has that signal."""
+    if not hasattr(signal, "SIGHUP"):
+        return
+    signal.signal(signal.SIGHUP, lambda _signum, _frame: state.reload())
 
 
 def read_preamble(conn):
@@ -610,6 +722,10 @@ def splice_mcp(client, upstream, allow):
     One thread per direction, because the response side is not driven by the
     request side's read loop: the session's `GET /stream` response stays open
     while the client sends nothing on it.
+
+    `allow` is None when the filter is off, which is not the same as an empty
+    list: an empty list names no tool, so every call is refused. Only None
+    passes everything through.
     """
     client_conn, upstream_conn = HttpConnection(client), HttpConnection(upstream)
     write_lock = threading.Lock()
@@ -648,7 +764,7 @@ def splice_mcp(client, upstream, allow):
             body = read_body(client_conn, headers)
             if body is None:
                 return
-            if body and allow:
+            if body and allow is not None:
                 try:
                     message = json.loads(body)
                 except ValueError:
@@ -700,7 +816,7 @@ def splice_mcp(client, upstream, allow):
                 body = read_body(upstream_conn, headers)
                 if body is None:
                     break
-                replaced = filtered_response(head, body, allow) if allow else None
+                replaced = filtered_response(head, body, allow) if allow is not None else None
                 with write_lock:
                     client.sendall(head + body if replaced is None else b"".join(replaced))
         except OSError:
@@ -724,7 +840,7 @@ def splice_mcp(client, upstream, allow):
     upstream.close()
 
 
-def relay_mcp(conn, instances_dir, payload, allow):
+def relay_mcp(conn, instances_dir, payload, allow_state):
     digest = payload.decode("ascii", "replace")
     if not is_digest(payload):
         conn.close()
@@ -744,7 +860,7 @@ def relay_mcp(conn, instances_dir, payload, allow):
         return
     upstream.settimeout(IDLE_TIMEOUT)
     conn.settimeout(IDLE_TIMEOUT)
-    splice_mcp(conn, upstream, allow)
+    splice_mcp(conn, upstream, allow_state.patterns)
 
 
 def relay_rpc(conn, instances_dir, payload):
@@ -761,7 +877,7 @@ def relay_rpc(conn, instances_dir, payload):
     splice_to(conn, port, digest)
 
 
-def handle(conn, instances_dir, allow):
+def handle(conn, instances_dir, allow_state):
     payload = read_preamble(conn)
     if payload is None:
         conn.close()
@@ -782,7 +898,7 @@ def handle(conn, instances_dir, allow):
         reply_mcp_port(conn, instances_dir, payload[len(MCP_PORT_PREFIX):])
         return
     if payload.startswith(MCP_PREFIX):
-        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):], allow)
+        relay_mcp(conn, instances_dir, payload[len(MCP_PREFIX):], allow_state)
         return
     relay_rpc(conn, instances_dir, payload)
 
@@ -794,20 +910,28 @@ def main(argv):
     parser.add_argument("--instances", default="",
                         help="directory holding the IDE instance files "
                              "(default: $JUNIE_HOME/instances)")
+    parser.add_argument("--config", default="",
+                        help="TOML file naming the MCP tools the sandbox may reach, "
+                             "under `allow_tools`; SIGHUP re-reads it "
+                             "(default: $JUNIE_IDE_RELAYD_CONFIG, else "
+                             "$XDG_CONFIG_HOME/junie-sbx/%s)" % CONFIG_BASENAME)
     parser.add_argument("--allow-tool", action="append", default=None, metavar="NAME",
                         help="an MCP tool the sandbox may reach, as an exact name or a "
-                             "name ending in '*'; repeatable, replacing the defaults "
-                             "(default: %s)" % ", ".join(DEFAULT_ALLOW_TOOLS))
+                             "name ending in '*'; repeatable, overriding the config file "
+                             "and replacing the defaults")
     parser.add_argument("--no-tool-filter", action="store_true",
                         help="relay the IDE's built-in MCP server unfiltered")
     args = parser.parse_args(argv)
 
-    if args.no_tool_filter:
-        allow = None
-    elif args.allow_tool is None:
-        allow = DEFAULT_ALLOW_TOOLS
-    else:
-        allow = tuple(args.allow_tool)
+    config_path = args.config or default_config_path()
+    try:
+        allow_state = AllowState(config_path, args.allow_tool, args.no_tool_filter)
+    except (OSError, ValueError) as err:
+        # Refused rather than falling back to the defaults: a config file that
+        # does not load would otherwise leave a list the operator thinks they
+        # replaced.
+        sys.stderr.write("junie-ide-relayd: bad config %s: %s\n" % (config_path, err))
+        return 1
 
     instances_dir = resolve_instances(args.instances)
     if not os.path.isdir(instances_dir):
@@ -820,16 +944,16 @@ def main(argv):
     listener.listen(64)
     sys.stderr.write("junie-ide-relayd: listening on 127.0.0.1:%d, instances %s\n"
                      % (args.port, instances_dir))
-    if allow:
-        sys.stderr.write("junie-ide-relayd: allowing MCP tools %s\n"
-                         % ", ".join(allow))
+    report_allow(allow_state.patterns, allow_state.source)
+    install_reload_handler(allow_state)
 
     while True:
         try:
             conn, _ = listener.accept()
         except OSError:
             continue
-        threading.Thread(target=handle, args=(conn, instances_dir, allow), daemon=True).start()
+        threading.Thread(target=handle, args=(conn, instances_dir, allow_state),
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ toolchain plus a Docker engine for the sandbox's own VM — and the CLI comes fr
 - Junie on the host, at `~/.local/bin/junie` — the sandbox runs that binary rather than installing
   one of its own.
 - `sbx`, and `bindfs` for the read-only view of `~/.junie`.
+- `python3` for both relay halves; the daemon reads its config with the stdlib `tomllib`, so 3.11 is
+  its floor.
 - An API key: `JUNIE_API_KEY`, or a BYOK key from a provider `kit/spec.yaml` declares.
 
 ## Setup
@@ -89,7 +91,9 @@ python3 bin/junie-ide-relayd &
 ```
 
 It needs no arguments; `--port` and `--instances` override the fixed port and the
-`~/.junie/instances` directory it reads. The sandbox-side relay is a no-op until it is up.
+`~/.junie/instances` directory it reads, and `--config` points at another allowlist file, which
+[MCP tools](#connecting-to-an-ide-on-the-host) below covers. The sandbox-side relay is a no-op until
+it is up.
 
 It is a foreground process, so it can be left in a terminal or put under whatever supervisor you
 already use. `systemd/user/junie-ide-relayd.service` is a sample user unit for it: copy that file
@@ -147,8 +151,27 @@ that runs a command or code on the host is named — `execute_terminal_command` 
 there, `execute_run_configuration` runs a run point the sandbox creates for itself by writing an
 executable script into the project it shares with the host, `execute_code_on_kernel` and
 `run_notebook_cell` run code in a kernel, and `execute_sql_query` runs a statement against a
-database. `--allow-tool NAME` (an exact name, or a name ending in `*`) replaces the list, and
-`--no-tool-filter` relays it unfiltered.
+database.
+
+Edit the list in a config file rather than in the unit's `ExecStart`, at
+`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — the same root `setup-junie-sbx.sh` puts its
+read-only view and per-project state under. It is TOML — the stdlib `tomllib` reads it, so the
+daemon needs no dependency beyond `python3` 3.11 — and it names the tools as patterns:
+
+```toml
+allow_tools = ["apply_patch", "get_*", "read_*"]
+```
+
+A file that is absent leaves the built-in list in force. `--config PATH` and
+`$JUNIE_IDE_RELAYD_CONFIG` point somewhere else, and `--allow-tool NAME` (an exact name, or a name
+ending in `*`) overrides the file. `--no-tool-filter` relays the IDE's list unfiltered. An
+`allow_tools` list that is empty is not unfiltered — it names no tool, so every call is refused. A
+file that will not parse stops the daemon at startup, and one that will not parse on a reload leaves
+the list already in force.
+
+`SIGHUP` re-reads the file, so a change does not drop the connections a running sandbox holds:
+`systemctl --user reload junie-ide-relayd` under the sample unit, or `kill -HUP` on the daemon's pid.
+The list in force is named in the log at startup and at each reload, with the source it came from.
 
 The two halves speak a versioned protocol, and the sandbox publishes nothing against a daemon older
 than it needs — a daemon started before one of its preambles closed its connection silently, which
