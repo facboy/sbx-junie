@@ -20,6 +20,7 @@ USER_UV_CACHE="${HOME}/.cache/uv"
 USER_FNM="${HOME}/.local/share/fnm"
 USER_PNPM="${HOME}/.local/share/pnpm"
 USER_PNPM_CACHE="${HOME}/.cache/pnpm"
+USER_PW_CACHE="${HOME}/.cache/ms-playwright"
 
 PROJ="$(basename "$(pwd)")"
 
@@ -31,6 +32,69 @@ PROJ="$(basename "$(pwd)")"
 PROJ_DIR="${SBX_STATE_DIR}/${PROJ}"
 JUNIE_HOME="${PROJ_DIR}/_junie"
 OV_ROOT="${PROJ_DIR}/overlays"
+
+# Per-project switches: which of the host's tool trees this project's sandbox
+# gets. They come from `.junie/sbx.toml` in the project directory, as `uv` and
+# `pnpm` booleans, and default to on, so a project with no file behaves as it did
+# before the switches existed. `JUNIE_SBX_UV` and `JUNIE_SBX_PNPM` override the
+# file for a single run. Node and the Playwright browsers follow pnpm: the tree
+# pnpm runs on and the browsers it drives go with it.
+SWITCH_FILE="${PWD}/.junie/sbx.toml"
+UV_ON=1
+PNPM_ON=1
+
+switch_value() {
+	case "$1" in
+		1 | true | yes | on) echo 1 ;;
+		0 | false | no | off) echo 0 ;;
+		*)
+			echo "junie-sbx: $2 wants true or false, not '$1'" >&2
+			exit 1
+			;;
+	esac
+}
+
+# tomllib is the stdlib reader the relay daemon also uses, so a file that will
+# not parse stops the run rather than leaving a switch looking set when it never
+# loaded.
+read_switch_file() {
+	python3 - "${SWITCH_FILE}" <<-'PY'
+		import sys, tomllib
+
+		try:
+		    with open(sys.argv[1], "rb") as handle:
+		        document = tomllib.load(handle)
+		except (OSError, tomllib.TOMLDecodeError) as err:
+		    sys.stderr.write("junie-sbx: %s: %s\n" % (sys.argv[1], err))
+		    raise SystemExit(1)
+		for name in ("uv", "pnpm"):
+		    if name not in document:
+		        continue
+		    value = document[name]
+		    if not isinstance(value, bool):
+		        sys.stderr.write("junie-sbx: %s wants true or false, not %r\n"
+		                         % (name, value))
+		        raise SystemExit(1)
+		    print("%s=%d" % (name, value))
+	PY
+}
+
+if [[ -f "${SWITCH_FILE}" ]]; then
+	switches="$(read_switch_file)"
+	while IFS='=' read -r name value; do
+		case "${name}" in
+			uv) UV_ON="$(switch_value "${value}" "${SWITCH_FILE}")" ;;
+			pnpm) PNPM_ON="$(switch_value "${value}" "${SWITCH_FILE}")" ;;
+		esac
+	done <<< "${switches}"
+fi
+
+if [[ -n "${JUNIE_SBX_UV:-}" ]]; then
+	UV_ON="$(switch_value "${JUNIE_SBX_UV}" "JUNIE_SBX_UV")"
+fi
+if [[ -n "${JUNIE_SBX_PNPM:-}" ]]; then
+	PNPM_ON="$(switch_value "${JUNIE_SBX_PNPM}" "JUNIE_SBX_PNPM")"
+fi
 
 # One secret per project, provisioned here and handed to the sandbox: the host
 # relay daemon splices a connection only when its preamble carries the secret
@@ -122,14 +186,28 @@ if [[ ! -d "${JUNIE_HOME}" ]]; then
 	init_junie_home
 fi
 
-merge_overlay "${USER_UV_CACHE}" uv-cache
-UV_CACHE_MERGED="${MERGED_PATH}"
-merge_overlay "${USER_UV}/tools" uv-tools
-UV_TOOLS_MERGED="${MERGED_PATH}"
-merge_overlay "${USER_PNPM_CACHE}" pnpm-cache
-PNPM_CACHE_MERGED="${MERGED_PATH}"
-merge_overlay "${USER_PNPM}" pnpm
-PNPM_MERGED="${MERGED_PATH}"
+# Only a tree its switch left on is overlaid and mounted; an off tree is absent
+# from the sandbox entirely, so its cache and store stay the host's alone.
+UV_CACHE_MERGED=""
+UV_TOOLS_MERGED=""
+PNPM_CACHE_MERGED=""
+PNPM_MERGED=""
+PW_CACHE_MERGED=""
+
+if [[ "${UV_ON}" == 1 ]]; then
+	merge_overlay "${USER_UV_CACHE}" uv-cache
+	UV_CACHE_MERGED="${MERGED_PATH}"
+	merge_overlay "${USER_UV}/tools" uv-tools
+	UV_TOOLS_MERGED="${MERGED_PATH}"
+fi
+if [[ "${PNPM_ON}" == 1 ]]; then
+	merge_overlay "${USER_PNPM_CACHE}" pnpm-cache
+	PNPM_CACHE_MERGED="${MERGED_PATH}"
+	merge_overlay "${USER_PNPM}" pnpm
+	PNPM_MERGED="${MERGED_PATH}"
+	merge_overlay "${USER_PW_CACHE}" ms-playwright
+	PW_CACHE_MERGED="${MERGED_PATH}"
+fi
 
 MOUNTS=(
 	.
@@ -148,20 +226,48 @@ add_mount() {
 	fi
 }
 
-add_mount "${USER_UV}" ":ro"
-add_mount "${USER_FNM}" ":ro"
-add_mount "${UV_CACHE_MERGED}" ""
-add_mount "${UV_TOOLS_MERGED}" ""
-add_mount "${PNPM_CACHE_MERGED}" ""
-add_mount "${PNPM_MERGED}" ""
+if [[ "${UV_ON}" == 1 ]]; then
+	add_mount "${USER_UV}" ":ro"
+	add_mount "${UV_CACHE_MERGED}" ""
+	add_mount "${UV_TOOLS_MERGED}" ""
+fi
+if [[ "${PNPM_ON}" == 1 ]]; then
+	add_mount "${USER_FNM}" ":ro"
+	add_mount "${PNPM_CACHE_MERGED}" ""
+	add_mount "${PNPM_MERGED}" ""
+	add_mount "${PW_CACHE_MERGED}" ""
+fi
+
+# Only the variables a mounted tree needs reach the sandbox: with a switch off
+# its paths are absent, which is what leaves `junie-init.sh` linking nothing from
+# it. The resolved switches themselves always go, so the startup script knows
+# which trees the sandbox was given.
+ENVS=(
+	--env "JUNIE_HOME=${JUNIE_HOME}"
+	--env "USER_HOME=${HOME}"
+	--env "USER_CONFIG_HOME=${CONFIG_HOME}"
+	--env "JUNIE_IDE_RELAY_SECRET=${RELAY_SECRET}"
+	--env "JUNIE_SBX_UV=${UV_ON}"
+	--env "JUNIE_SBX_PNPM=${PNPM_ON}"
+)
+if [[ "${UV_ON}" == 1 ]]; then
+	ENVS+=(
+		--env "UV_PYTHON_INSTALL_DIR=${USER_UV}/python"
+		--env "UV_TOOL_DIR=${UV_TOOLS_MERGED}"
+		--env "UV_CACHE_DIR=${UV_CACHE_MERGED}"
+	)
+fi
+if [[ "${PNPM_ON}" == 1 ]]; then
+	ENVS+=(
+		--env "PNPM_HOME=${PNPM_MERGED}"
+		--env "JUNIE_PNPM_STORE=${PNPM_MERGED}/store"
+		--env "JUNIE_PNPM_CACHE=${PNPM_CACHE_MERGED}"
+		--env "PLAYWRIGHT_BROWSERS_PATH=${PW_CACHE_MERGED}"
+	)
+fi
 
 sbx run \
     --provider "ollama" --model "deepseek-v4.1-flash:cloud" \
-    --env "JUNIE_HOME=${JUNIE_HOME}" --env "USER_HOME=${HOME}" --env "USER_CONFIG_HOME=${CONFIG_HOME}" \
-    --env "JUNIE_IDE_RELAY_SECRET=${RELAY_SECRET}" \
-    --env "UV_PYTHON_INSTALL_DIR=${USER_UV}/python" --env "UV_TOOL_DIR=${UV_TOOLS_MERGED}" \
-    --env "UV_CACHE_DIR=${UV_CACHE_MERGED}" \
-    --env "PNPM_HOME=${PNPM_MERGED}" \
-    --env "JUNIE_PNPM_STORE=${PNPM_MERGED}/store" --env "JUNIE_PNPM_CACHE=${PNPM_CACHE_MERGED}" \
+    "${ENVS[@]}" \
     "${SBX_KIT}" \
     "${MOUNTS[@]}"

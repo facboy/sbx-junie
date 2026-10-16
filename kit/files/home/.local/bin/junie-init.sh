@@ -22,19 +22,28 @@ link_bin() {
 # fnm points its `default` alias at the active node version; fall back to
 # whatever is installed when that alias is absent. pnpm keys its store layout to
 # the pnpm that reads it, and that pnpm needs a node it can run on.
-for dir in "${USER_HOME}/.local/share/fnm/aliases/default/installation/bin" \
-	"${USER_HOME}/.local/share/fnm/node-versions/"*/installation/bin; do
-	if [ -x "${dir}/node" ]; then
-		for bin in node npm npx corepack pnpx; do
-			link_bin "${dir}/${bin}"
-		done
-		break
-	fi
-done
+if [ "${JUNIE_SBX_PNPM:-1}" = 1 ]; then
+	for dir in "${USER_HOME}/.local/share/fnm/aliases/default/installation/bin" \
+		"${USER_HOME}/.local/share/fnm/node-versions/"*/installation/bin; do
+		if [ -x "${dir}/node" ]; then
+			for bin in node npm npx corepack pnpx; do
+				link_bin "${dir}/${bin}"
+			done
+			break
+		fi
+	done
+fi
 
-link_bin "${USER_HOME}/.local/bin/uv"
-link_bin "${USER_HOME}/.local/bin/uvx"
-link_bin "${PNPM_HOME}/bin/pnpm"
+# Each tree is linked only when its switch left it on: the switches come from
+# the project's `.junie/sbx.toml`, and a tree left off is not mounted, so its
+# host path is absent here and the test below would skip it anyway.
+if [ "${JUNIE_SBX_UV:-1}" = 1 ]; then
+	link_bin "${USER_HOME}/.local/bin/uv"
+	link_bin "${USER_HOME}/.local/bin/uvx"
+fi
+if [ "${JUNIE_SBX_PNPM:-1}" = 1 ]; then
+	link_bin "${PNPM_HOME}/bin/pnpm"
+fi
 
 # pnpm reads store and cache locations from .npmrc. Writing them here rather
 # than exporting them keeps one source of truth for the two, and .npmrc is

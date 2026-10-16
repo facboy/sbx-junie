@@ -51,7 +51,8 @@ The host paths it passes:
   `tools/` into the Junie home the sandbox writes to,
 - `~/.local/share/junie` and `~/.local/bin`, where the host's CLI lives,
 - the host's uv and pnpm trees, read-only, and a writable overlay over each cache
-  and the pnpm store ([Your uv and pnpm environments](#your-uv-and-pnpm-environments)).
+  and the pnpm store ([Your uv and pnpm environments](#your-uv-and-pnpm-environments)), each of
+  which a project can leave out with a switch.
 
 Auth goes through the sandbox proxy; the credentials the kit declares, and why the allowlist names
 no install host, are in [`kit/README.md`](kit/README.md#how-auth-works).
@@ -72,10 +73,34 @@ environment variable rather than by copying them somewhere else:
   upper layer under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>/overlays`, never to
   the host trees. That is what lets `uv` and `pnpm` reuse a cache instead of re-downloading.
   `pnpm`'s store and cache paths reach it through a `~/.npmrc` that `junie-init.sh` writes.
+- `~/.cache/ms-playwright` is overlaid the same way, since the pnpm that runs your browser
+  installs needs somewhere to write them; `PLAYWRIGHT_BROWSERS_PATH` names the merged tree.
 
 Overlays are created on the host, since a sandbox cannot mount. They need either `fuse-overlayfs`
 or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and the sandbox caches
 locally instead.
+
+### Switching a tree off
+
+A project that does not want either tree sets two booleans in `.junie/sbx.toml` at the project
+root:
+
+```toml
+uv = true
+pnpm = false
+```
+
+Both default to on, so a project with no file behaves as it always did. `pnpm = false` drops the
+pnpm tree, its store and cache, and with them the host's node and fnm tree and the Playwright
+browsers under `~/.cache/ms-playwright`: the pnpm that matches your store needs the node it was
+built on, and the browsers it drives are the rest of that tool chain. `uv = false` drops the uv
+tree, its cache and its tools, and leaves pnpm alone. A tree left off is never mounted, so it is
+absent from the sandbox rather than present and unused, and its cache and store stay the host's
+alone.
+
+`JUNIE_SBX_UV=0` and `JUNIE_SBX_PNPM=0` override the file for one run, taking precedence over it.
+A value that is neither `true` nor `false` stops the run and names it: a typo would otherwise read
+as on, which is the default.
 
 ## Connecting to an IDE on the host
 
