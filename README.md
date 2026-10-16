@@ -147,11 +147,16 @@ names no built-in server, so a port the IDE gave up is not held open.
 Those tools reach the host, so the daemon allowlists them rather than passing the IDE's list
 through: a tool the allowlist does not name is removed from `tools/list` and refused before the IDE
 sees the call, which is what keeps a tool a later IDE build adds from arriving unreviewed. Nothing
-that runs a command or code on the host is named — `execute_terminal_command` runs a shell command
-there, `execute_run_configuration` runs a run point the sandbox creates for itself by writing an
-executable script into the project it shares with the host, `execute_code_on_kernel` and
-`run_notebook_cell` run code in a kernel, and `execute_sql_query` runs a statement against a
-database.
+that runs project-controlled code on the host is named, and nothing that addresses host state the
+sandbox could then reach through it, because the project is shared with the host writable and so is
+the payload: `build_project` runs its build tooling, `lint_files` and `reformat_file` its configured
+linters and formatters, `execute_run_configuration` a run point the sandbox writes into the project
+as an executable script, and `execute_sql_query` a statement against a configured database;
+`execute_terminal_command` runs a shell command outright. A Jupyter kernel is the same shape over a
+longer reach — it holds live objects, and `configure_python_interpreter` names an interpreter path
+the sandbox can write — so the notebook tools are withheld too, the ones that evaluate code and the
+ones that only manage a kernel already running. A build belongs in the sandbox's own Docker engine,
+which the kit's base image carries, rather than on the host.
 
 Edit the list in a config file rather than in the unit's `ExecStart`, at
 `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — the same root `setup-junie-sbx.sh` puts its
@@ -168,6 +173,9 @@ ending in `*`) overrides the file. `--no-tool-filter` relays the IDE's list unfi
 `allow_tools` list that is empty is not unfiltered — it names no tool, so every call is refused. A
 file that will not parse stops the daemon at startup, and one that will not parse on a reload leaves
 the list already in force.
+
+Every entry is a grant to run something on the host, so adding one back widens the boundary the
+defaults draw — the tools named above are withheld for that reason, not because they are unused.
 
 `SIGHUP` re-reads the file, so a change does not drop the connections a running sandbox holds:
 `systemctl --user reload junie-ide-relayd` under the sample unit, or `kill -HUP` on the daemon's pid.

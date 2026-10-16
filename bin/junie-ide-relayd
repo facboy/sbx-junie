@@ -91,43 +91,36 @@ MCP_PORT_UNKNOWN = b"JUNIE-RELAY 1 mcp-port unknown\n"
 # pattern is an exact tool name, or a name ending in `*`, which matches every
 # tool whose name begins with it.
 #
-# Nothing that runs a command or code on the host is listed:
-# `execute_terminal_command` runs a shell command there, and
-# `execute_run_configuration` runs a run point the sandbox creates for itself by
-# writing an executable script into the project it shares with the host; both
-# are host command execution. `execute_code_on_kernel` and `run_notebook_cell`
-# run code in a Jupyter kernel, and `execute_sql_query` runs a statement against
-# a configured database. Add one back with `--allow-tool` when work needs it.
+# Nothing that runs project-controlled code on the host is listed, and nothing
+# that addresses host state the sandbox could then reach. The project is writable
+# from the sandbox, so the project is the payload: a build runs its tooling, a
+# lint or reformat its configured tool, a run configuration a script the sandbox
+# wrote in, and `execute_sql_query` its configured database. A Jupyter kernel is
+# the same shape over a longer reach -- it holds live objects, and its interpreter
+# is a path the sandbox can write -- so the notebook tools are withheld too, along
+# with `configure_python_interpreter`. See "MCP tools" in ../README.md.
 #
-# `execute_tool` resolves a tool by name from its own argument, so it is listed
-# to keep the IDE's own routing working, and a call through it is checked
-# against these same patterns; see `refused_tool`. Exact names are preferred
-# over a `*` pattern where a prefix could reach a tool that was not reviewed.
+# `execute_tool` resolves a tool by name from its own argument, so it is listed to
+# keep the IDE's own routing working; a call through it is checked against these
+# same patterns, and exact names are preferred over a `*` pattern.
 DEFAULT_ALLOW_TOOLS = (
     "analyze_calls",
     "apply_patch",
-    "build_project",
     "cancel_sql_query",
-    "configure_python_interpreter",
     "create_*",
     "edit_*",
     "execute_tool",
     "fetch_query_result",
     "get_*",
     "git_status",
-    "interrupt_notebook",
     "introspect_schema",
-    "kill_notebook",
-    "lint_files",
     "list_*",
     "open_file_in_editor",
     "preview_table_data",
     "read_*",
-    "reformat_file",
     "rename_refactoring",
     "search_*",
     "test_database_connection",
-    "wait_cell_execution",
 )
 DISPATCHER_TOOL = "execute_tool"
 TOOL_LIST_MARKER = "Available tools: "

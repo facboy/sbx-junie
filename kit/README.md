@@ -107,15 +107,20 @@ notice. The same relay carries it:
 - The MCP exchange is parsed rather than spliced, so the daemon can hold the sandbox to an
   allowlist of tools. A tool the list does not name is removed from a `tools/list` reply and refused
   on `tools/call` from the daemon itself, so the IDE never sees the call: that is what keeps a tool a
-  later IDE build adds from arriving unreviewed. Nothing that runs a command or code on the host is
-  named — `execute_terminal_command` runs a shell command there, `execute_run_configuration` runs a
-  run point the sandbox creates for itself by writing an executable script into the project it
-  shares with the host, `execute_code_on_kernel` and `run_notebook_cell` run code in a kernel, and
-  `execute_sql_query` runs a statement against a database. `execute_tool` resolves a tool by name
-  from its own argument, so it is allowlisted to keep the routing working and a call through it is
-  checked against the same list. Both the request path and the session's
-  `GET /stream` are framed; a streamed reply is passed through as it arrives, since it stays open
-  for the life of the session.
+  later IDE build adds from arriving unreviewed. Nothing that runs project-controlled code on the
+  host is named, and nothing that addresses host state the sandbox could then reach through it,
+  because the project is shared with the host writable and so is the payload: `build_project` runs
+  its build tooling, `lint_files` and `reformat_file` its configured linters and formatters,
+  `execute_run_configuration` a run point the sandbox writes into the project as an executable
+  script, and `execute_sql_query` a statement against a configured database;
+  `execute_terminal_command` runs a shell command outright. A Jupyter kernel is the same shape over a
+  longer reach — it holds live objects, and `configure_python_interpreter` names an interpreter path
+  the sandbox can write — so the notebook tools are withheld too, the ones that evaluate code and the
+  ones that only manage a kernel already running. A build belongs in the sandbox's own Docker engine,
+  which the base image carries. `execute_tool` resolves a tool by name from its own argument, so it
+  is allowlisted to keep the routing working and a call through it is checked against the same list.
+  Both the request path and the session's `GET /stream` are framed; a streamed reply is passed
+  through as it arrives, since it stays open for the life of the session.
 - The list itself comes from a TOML config file at
   `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — one host-wide file, since the daemon
   serves every sandbox — written as `allow_tools = ["apply_patch", "get_*"]`. The daemon needs no
