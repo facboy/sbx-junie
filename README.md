@@ -108,8 +108,14 @@ Consequences worth knowing:
 - A browser whose build needs a *newer* C library than the image provides cannot be fixed this way:
   the versions its libraries demand come from the image, so `ldconfig` reports the symbol it cannot
   satisfy. That is a mismatch to fix in the image, not on the host.
-- The set is a sibling of the overlays, so it survives a restart and is rewritten on each run. It is
-  never the sandbox's own file: nothing the sandbox writes touches your library tree.
+- The set is a sibling of the overlays, so it survives a restart and is rewritten on each run. Its
+  files are replaced one by one rather than by removing the directory: a sandbox holds it mounted, and
+  a mount of a directory that has been unlinked resolves nothing, so every library registered from it
+  would go with it. It is never the sandbox's own file: nothing the sandbox writes touches your
+  library tree.
+- A sandbox whose mount is already broken that way cannot be repaired from inside it: its mount is on
+  the unlinked inode, which no later write reaches. Discard it and run `junie-sbx.sh` again, which
+  rewrites the set in place and launches a sandbox that mounts it afresh.
 
 ### Switching a tree off
 

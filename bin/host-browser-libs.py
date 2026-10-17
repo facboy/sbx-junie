@@ -76,6 +76,22 @@ def closure(entry, skip):
     return found
 
 
+def replace_contents(dest):
+    """Empty dest without removing it. A sandbox mounts this directory
+    read-only, and removing it leaves that mount on an unlinked inode, which
+    drops every library the sandbox had registered at once."""
+    os.makedirs(dest, exist_ok=True)
+    for entry in os.listdir(dest):
+        path = os.path.join(dest, entry)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def main(argv):
     if len(argv) != 3:
         sys.stderr.write("usage: host-browser-libs.py <playwright-cache> <dest-dir>\n")
@@ -131,10 +147,9 @@ def main(argv):
 
     # Rewritten every run: the host's browser build changes under it, and a
     # stale file left from an earlier one would be a library the browser no
-    # longer matches.
-    if os.path.isdir(dest):
-        shutil.rmtree(dest, ignore_errors=True)
-    os.makedirs(dest, exist_ok=True)
+    # longer matches. The directory itself stays, since a running sandbox
+    # holds it mounted.
+    replace_contents(dest)
 
     for name, source in sorted(libs.items()):
         shutil.copy2(source, os.path.join(dest, name))

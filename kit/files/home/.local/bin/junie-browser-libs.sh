@@ -32,8 +32,17 @@ rm -rf "${MERGED}"
 ldconfig
 
 if [ ! -d "${HOST_LIBS}" ]; then
-	echo "junie-browser-libs: ${HOST_LIBS} is not mounted, so the host's browser libraries are unavailable" >&2
-	echo "  Chromium will not start unless this image already carries its runtime libraries." >&2
+	# A path that is mounted but resolves nothing means the host replaced the
+	# directory under the mount; one that was never mounted is absent from
+	# /proc/self/mounts. Both fail this test, and neither is distinguishable
+	# from the other without it.
+	if grep -qF " ${HOST_LIBS} " /proc/self/mounts 2> /dev/null; then
+		echo "junie-browser-libs: ${HOST_LIBS} is mounted but resolves nothing: the host replaced the" >&2
+		echo "  directory under this mount. Re-run junie-sbx.sh for a sandbox that mounts it afresh." >&2
+	else
+		echo "junie-browser-libs: ${HOST_LIBS} is not mounted, so the host's browser libraries are unavailable" >&2
+		echo "  Chromium will not start unless this image already carries its runtime libraries." >&2
+	fi
 	exit 0
 fi
 
