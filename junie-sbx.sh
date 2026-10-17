@@ -21,6 +21,8 @@ USER_FNM="${HOME}/.local/share/fnm"
 USER_PNPM="${HOME}/.local/share/pnpm"
 USER_PNPM_CACHE="${HOME}/.cache/pnpm"
 USER_PW_CACHE="${HOME}/.cache/ms-playwright"
+HOST_BROWSER_LIBS="${CONFIG_HOME}/browser-libs"
+HOST_BROWSER_LIBS_PY="${HOME}/git/sbx-junie/bin/host-browser-libs.py"
 
 PROJ="$(basename "$(pwd)")"
 
@@ -193,6 +195,7 @@ UV_TOOLS_MERGED=""
 PNPM_CACHE_MERGED=""
 PNPM_MERGED=""
 PW_CACHE_MERGED=""
+BROWSER_LIBS=0
 
 if [[ "${UV_ON}" == 1 ]]; then
 	merge_overlay "${USER_UV_CACHE}" uv-cache
@@ -207,6 +210,17 @@ if [[ "${PNPM_ON}" == 1 ]]; then
 	PNPM_MERGED="${MERGED_PATH}"
 	merge_overlay "${USER_PW_CACHE}" ms-playwright
 	PW_CACHE_MERGED="${MERGED_PATH}"
+
+	# A host that can run the browsers has Chromium's runtime libraries, so
+	# they are read from here rather than apt-installed into the image. The
+	# browsers are mounted regardless -- the sandbox may carry its own
+	# libraries -- but the set is only worth gathering when the cache exists.
+	if [[ -d "${USER_PW_CACHE}" ]]; then
+		if python3 "${HOST_BROWSER_LIBS_PY}" "${USER_PW_CACHE}" \
+			"${HOST_BROWSER_LIBS}"; then
+			BROWSER_LIBS=1
+		fi
+	fi
 fi
 
 MOUNTS=(
@@ -238,6 +252,12 @@ if [[ "${PNPM_ON}" == 1 ]]; then
 	add_mount "${PW_CACHE_MERGED}" ""
 fi
 
+# The gathered browser libraries are mounted beside the browsers they belong to,
+# and only when the gather produced them: the sandbox script reads that path.
+if [[ "${BROWSER_LIBS}" == 1 ]]; then
+	add_mount "${HOST_BROWSER_LIBS}" ":ro"
+fi
+
 # Only the variables a mounted tree needs reach the sandbox: with a switch off
 # its paths are absent, which is what leaves `junie-init.sh` linking nothing from
 # it. The resolved switches themselves always go, so the startup script knows
@@ -265,8 +285,15 @@ if [[ "${PNPM_ON}" == 1 ]]; then
 		--env "PLAYWRIGHT_BROWSERS_PATH=${PW_CACHE_MERGED}"
 	)
 fi
+# The mount lands at the host's own path, so the sandbox script is told that
+# path rather than left to guess at its own default.
+if [[ "${BROWSER_LIBS}" == 1 ]]; then
+	ENVS+=(
+		--env "JUNIE_HOST_BROWSER_LIBS=${HOST_BROWSER_LIBS}"
+	)
+fi
 
-sbx run \
+exec sbx run \
     --provider "ollama" --model "deepseek-v4.1-flash:cloud" \
     "${ENVS[@]}" \
     "${SBX_KIT}" \

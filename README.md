@@ -6,7 +6,9 @@ Uses your user junie install, allows connection to IDE running on the host. The 
 described in [`kit/README.md`](kit/README.md); this file is the host side, and how to drive both.
 
 The kit builds no image: the sandbox boots `docker/sandbox-templates:shell-docker` — the standard
-toolchain plus a Docker engine for the sandbox's own VM — and the CLI comes from the host mount.
+toolchain plus a Docker engine for the sandbox's own VM — and the CLI comes from the host mount. The
+base image carries none of Chromium's runtime libraries, so `junie-sbx.sh` reads them off your host
+([Browser libraries](#browser-libraries)) instead of installing them into the sandbox.
 
 ## Prerequisites
 
@@ -80,6 +82,34 @@ environment variable rather than by copying them somewhere else:
 Overlays are created on the host, since a sandbox cannot mount. They need either `fuse-overlayfs`
 or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and the sandbox caches
 locally instead.
+
+## Browser libraries
+
+The overlay gives the sandbox your browsers, but not the system libraries they link: the base image
+carries none of them, and Chromium exits with
+`error while loading shared libraries: libglib-2.0.so.0`. A host that can run Chromium already has
+them — Playwright checks the host for exactly this set and prints the apt command when they are
+missing — so they are read from there rather than installed into the image.
+
+`junie-sbx.sh` walks the browser's own dependency tree with `ldd`, copies the result to
+`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/browser-libs`, and mounts it read-only. At every sandbox
+start `junie-browser-libs.sh` registers those libraries with the image's loader, skipping any name
+the image already resolves. That ordering is the whole safety argument: a host `libc.so.6` or
+`libm.so.6` on the loader's path is fatal — every binary in the image dies with
+`undefined symbol __nptl_change_stack_perm, version GLIBC_PRIVATE` — so both halves skip the C
+runtime and the loader family, and the sandbox re-derives the skip list from its own image on every
+start.
+
+Consequences worth knowing:
+
+- The gathering is what fails, not the sandbox: it stops before `sbx` runs if the host cache holds no
+  Chromium, or if the browser resolves no `libglib-2.0.so.0`. Both mean the host never ran
+  `npx playwright install chromium`, which is also what the browser overlay needs.
+- A browser whose build needs a *newer* C library than the image provides cannot be fixed this way:
+  the versions its libraries demand come from the image, so `ldconfig` reports the symbol it cannot
+  satisfy. That is a mismatch to fix in the image, not on the host.
+- The set is a sibling of the overlays, so it survives a restart and is rewritten on each run. It is
+  never the sandbox's own file: nothing the sandbox writes touches your library tree.
 
 ### Switching a tree off
 
