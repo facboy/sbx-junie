@@ -4,11 +4,17 @@ name: junie
 displayName: Junie
 description: The AI coding agent by JetBrains.
 sandbox:
-  # Use the host user's junie install. The base carries a Docker engine and the
-  # com.docker.sandboxes.start-docker label, so `docker build` and `compose` run
-  # against an engine inside the sandbox's own VM. The plain `shell` base has no
-  # engine, and the host's daemon is unreachable from a sandbox by design.
-  image: docker/sandbox-templates:shell-docker
+  # Built from the Dockerfile beside this spec: the base carries a Docker engine
+  # and the com.docker.sandboxes.start-docker label, so `docker build` and
+  # `compose` run against an engine inside the sandbox's own VM. The plain
+  # `shell` base has no engine, and the host's daemon is unreachable from a
+  # sandbox by design.
+  #
+  # Junie itself is not in it: the CLI is the host's own, mounted in and linked
+  # by `junie-init.sh`. What the image adds is the libraries the host's Playwright
+  # browsers link, which no template carries and which a mount cannot supply --
+  # see "Browser libraries" in README.md.
+  image: docker.io/facboy/junie-image:latest
   entrypoint:
     - junie
 agentInstructions:
@@ -104,17 +110,6 @@ environment:
     JUNIE_SKIP_UPDATE_CHECK: "1"
 setup:
   startup:
-    # Registers the host's copies of Chromium's runtime libraries with this
-    # image's loader. The browsers come from the host's Playwright cache, but
-    # the base image carries none of the libraries they link, so without this
-    # `chrome` exits with "error while loading shared libraries:
-    # libglib-2.0.so.0". Runs before the relay only for tidiness; the two are
-    # independent. See "Browser libraries" in README.md.
-    - command:
-        - sh
-        - /home/agent/.local/bin/junie-browser-libs.sh
-      user: "0"
-      description: Register the host's Chromium runtime libraries with the image's loader
     # Locates the host's IDE instance directory among the read-only workspaces
     # and relays this sandbox's own project to a loopback endpoint Junie can
     # reach, so `/ide` sees the same project the host has open, plus a mirror of

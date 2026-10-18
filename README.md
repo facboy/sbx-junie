@@ -5,10 +5,11 @@ My fork(ish) of https://github.com/docker/sbx-kits-contrib/tree/main/junie
 Uses your user junie install, allows connection to IDE running on the host. The kit is `kit/`,
 described in [`kit/README.md`](kit/README.md); this file is the host side, and how to drive both.
 
-The kit builds no image: the sandbox boots `docker/sandbox-templates:shell-docker` — the standard
-toolchain plus a Docker engine for the sandbox's own VM — and the CLI comes from the host mount. The
-base image carries none of Chromium's runtime libraries, so `junie-sbx.sh` reads them off your host
-([Browser libraries](#browser-libraries)) instead of installing them into the sandbox.
+The kit builds your browsers' libraries into its image: the sandbox boots this fork's own
+`docker.io/facboy/junie-image`, built from [`kit/Dockerfile`](kit/Dockerfile) on top of
+`docker/sandbox-templates:shell-docker` — the standard toolchain plus a Docker engine for the
+sandbox's own VM. The CLI comes from the host mount, as do the browsers themselves; the image
+carries what they link ([Browser libraries](#browser-libraries)).
 
 ## Prerequisites
 
@@ -76,8 +77,10 @@ environment variable rather than by copying them somewhere else:
   upper layer under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>/overlays`, never to
   the host trees. That is what lets `uv` and `pnpm` reuse a cache instead of re-downloading.
   `pnpm`'s store and cache paths reach it through a `~/.npmrc` that `junie-init.sh` writes.
-- `~/.cache/ms-playwright` is overlaid the same way, since the pnpm that runs your browser
-  installs needs somewhere to write them; `PLAYWRIGHT_BROWSERS_PATH` names the merged tree.
+- `~/.cache/ms-playwright` is overlaid the same way, for the same reason: `npx playwright install`
+  writes there, so the sandbox needs somewhere to put a browser without touching your cache.
+  `PLAYWRIGHT_BROWSERS_PATH` names the merged tree. The libraries those browsers link are the
+  image's job, not this one ([Browser libraries](#browser-libraries)).
 
 Overlays are created on the host, since a sandbox cannot mount. They need either `fuse-overlayfs`
 or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and the sandbox caches
@@ -85,37 +88,38 @@ locally instead.
 
 ## Browser libraries
 
-The overlay gives the sandbox your browsers, but not the system libraries they link: the base image
-carries none of them, and Chromium exits with
-`error while loading shared libraries: libglib-2.0.so.0`. A host that can run Chromium already has
-them — Playwright checks the host for exactly this set and prints the apt command when they are
-missing — so they are read from there rather than installed into the image.
+The sandbox runs the browsers from your Playwright cache, but the libraries they link are not yours to
+supply: the base image carries almost none of them, and `chrome` exits with
+`error while loading shared libraries: libglib-2.0.so.0`. They are installed into the image instead,
+by [`kit/Dockerfile`](kit/Dockerfile), which runs Playwright's own `install-deps` for the pinned
+release so the package names follow the distro rather than a list kept by hand.
 
-`junie-sbx.sh` walks the browser's own dependency tree with `ldd`, copies the result to
-`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/browser-libs`, and mounts it read-only. At every sandbox
-start `junie-browser-libs.sh` registers those libraries with the image's loader, skipping any name
-the image already resolves. That ordering is the whole safety argument: a host `libc.so.6` or
-`libm.so.6` on the loader's path is fatal — every binary in the image dies with
-`undefined symbol __nptl_change_stack_perm, version GLIBC_PRIVATE` — so both halves skip the C
-runtime and the loader family, and the sandbox re-derives the skip list from its own image on every
-start.
+That covers Chromium, Firefox and WebKit. Things the resolver does not, because they are read from
+disk at run time rather than linked:
+
+- **DRI drivers.** Headless WebKit renders through EGL, loaded by path from a driver directory rather
+  than by soname, and without a software rasteriser it aborts with
+  `Could not create EGL display: no supported platform available`.
+- **Fonts**, which fontconfig enumerates; with none, text measures as zero-width.
+- **ICU 74 and `libxml2.so.2`**, taken from noble and extracted rather than installed. WebKit
+  publishes one bundle per distro, and a host cache populated under 24.04 holds one that links those
+  by soname. This base ships ICU 78 and `libxml2.so.16` instead, and ICU embeds its major version in
+  every symbol name, so a newer ICU cannot satisfy an older link. Extracting the two — rather than
+  installing noble's `libxml2`, which would replace the image's own — lets such a cache run as-is. A
+  cache populated under this base's own distro needs none of it.
 
 Consequences worth knowing:
 
-- The gathering is what fails, not the sandbox: it stops before `sbx` runs if the host cache holds no
-  Chromium, or if the browser resolves no `libglib-2.0.so.0`. Both mean the host never ran
-  `npx playwright install chromium`, which is also what the browser overlay needs.
-- A browser whose build needs a *newer* C library than the image provides cannot be fixed this way:
-  the versions its libraries demand come from the image, so `ldconfig` reports the symbol it cannot
-  satisfy. That is a mismatch to fix in the image, not on the host.
-- The set is a sibling of the overlays, so it survives a restart and is rewritten on each run. Its
-  files are replaced one by one rather than by removing the directory: a sandbox holds it mounted, and
-  a mount of a directory that has been unlinked resolves nothing, so every library registered from it
-  would go with it. It is never the sandbox's own file: nothing the sandbox writes touches your
-  library tree.
-- A sandbox whose mount is already broken that way cannot be repaired from inside it: its mount is on
-  the unlinked inode, which no later write reaches. Discard it and run `junie-sbx.sh` again, which
-  rewrites the set in place and launches a sandbox that mounts it afresh.
+- The image is what makes the browsers work, so a sandbox on a bare template has none of this and
+  fails with the `libglib-2.0.so.0` error above.
+- The dependency set tracks the Playwright release the image was built for (`PLAYWRIGHT_VERSION` in
+  the Dockerfile). A host on a newer release works while that release needs nothing extra; one whose
+  browsers start failing on a missing soname means the image is behind and wants a rebuild.
+- Only WebKit is distro-pinned tightly enough to matter: Playwright ships no WebKit for 26.04 before
+  `1.61`, so a project pinned below that cannot install a WebKit this image can run, no matter what
+  the image carries.
+- Nothing about the library path can break from inside a running sandbox: there is no mount to go
+  stale, which is why the earlier gather-and-register path is gone.
 
 ### Switching a tree off
 

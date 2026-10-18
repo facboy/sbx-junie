@@ -164,10 +164,10 @@ Each credential sets `apiKey.proxyManaged: true` to ensure it's handled securely
 `permissions.network.allow` lists no install hosts at all — `github.com`,
 `raw.githubusercontent.com`, and `release-assets.githubusercontent.com` are absent. Nothing installs
 Junie in the sandbox: the CLI is the host's own, and the spec sets `JUNIE_SKIP_UPDATE_CHECK=1`, which
-stops that binary from fetching and staging a newer build at runtime. Nor does anything install
-Chromium's libraries here: they come from the host and are registered by `junie-browser-libs.sh`,
-which reads only the mount, so it needs no egress either. `junie.jetbrains.com` stays in the
-allowlist regardless, because it is also the `junie` credential's inject domain above.
+stops that binary from fetching and staging a newer build at runtime. The browsers' libraries are
+in the image rather than fetched at run time, so they add no host here either
+([Base image](#base-image)). `junie.jetbrains.com` stays in the allowlist regardless, because it
+is also the `junie` credential's inject domain above.
 
 Junie's own multi-channel switching (`junie --eap`, `--nightly`, `--experimental`) is outside this kit's supported
 surface: it fetches and installs another channel's build on demand, and that build's hosts are not part of this
@@ -198,25 +198,22 @@ host-side.
 ## Base image
 
 A `kind: sandbox` kit *is* the whole environment, so it names the image the sandbox boots from. This
-fork names `docker/sandbox-templates:shell-docker`: the standard sandbox toolchain plus a Docker
-engine, and no Junie in it. The engine is the sandbox's own, inside its VM — a sandbox has no path to
-the host's daemon — and the template already carries `com.docker.sandboxes.start-docker=true`, which
-is what asks the runtime to start it. The CLI comes from the host instead — the root scripts mount
+fork builds `docker.io/sbx/junie-image` from the [`Dockerfile`](Dockerfile) beside this spec, on top of
+`docker/sandbox-templates:shell-docker`: the standard sandbox toolchain plus a Docker engine, and no
+Junie in it. The engine is the sandbox's own, inside its VM — a sandbox has no path to the host's
+daemon — and the derived image keeps the base's `com.docker.sandboxes.start-docker=true`, which is
+what asks the runtime to start it. The CLI comes from the host instead — the root scripts mount
 `~/.local/bin` and `~/.local/share/junie` read-only, and `junie-init.sh` symlinks them into
 `/home/agent` at startup so the `junie` entrypoint resolves.
 
-That is also why nothing here builds or publishes an image, and why the kit's egress allowlist can
-name no install host: the vendor install script never runs, in the sandbox or at image build. The
-engine adds no host to the allowlist either, since nothing here installs through it at create time.
-
-The base image carries almost none of Chromium's runtime libraries, though — it holds no
-`libglib-2.0.so.0`, and 18 more of the 21 Chromium links, leaving only `libnss3.so` and `libnspr4.so`
-— so a browser from the host's Playwright cache would exit with
-`error while loading shared libraries: libglib-2.0.so.0`. The root scripts close that by reading the
-libraries off the host, which already has them ([Browser libraries](../README.md#browser-libraries)),
-and `junie-browser-libs.sh` registers them with this image's loader at startup. Both halves skip the
-C runtime and the loader, which must stay the image's own: a host `libc.so.6` on the loader's path
-makes every binary here die with `undefined symbol __nptl_change_stack_perm, version GLIBC_PRIVATE`.
+Junie is not installed into the image, and neither is a browser: both come from the host, so the
+vendor install script never runs and the kit's egress allowlist can name no install host. What the
+image does carry is the libraries the host's browsers link — no template has them, and a mount cannot
+supply what loads by path rather than by soname, which is what ruled the earlier
+gather-them-off-the-host approach out ([Browser libraries](../README.md#browser-libraries)). Those
+libraries are installed at image build time from Playwright's own dependency list, so they add no host
+to the runtime allowlist either. The engine adds none, since nothing here installs through it at
+create time.
 
 `JUNIE_SKIP_UPDATE_CHECK=1`, set by the spec's `environment`, seals the installed binary's own
 runtime auto-update check. Without it the shim polls for and stages a newer build of the channel it
