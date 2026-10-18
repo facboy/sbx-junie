@@ -110,24 +110,18 @@ MCP_PORT_GONE = b"JUNIE-RELAY 1 mcp-port gone\n"
 # keeps its mirror on this, since a momentary failure answers the same way.
 MCP_PORT_UNKNOWN = b"JUNIE-RELAY 1 mcp-port unknown\n"
 
-# What the sandbox may reach through the IDE's built-in MCP server, as patterns.
-# Anything matching nothing here is removed from `tools/list` and refused on
-# `tools/call`, so a tool a later IDE build adds cannot arrive unreviewed. A
-# pattern is an exact tool name, or a name ending in `*`, which matches every
-# tool whose name begins with it.
+# What the sandbox may reach through the IDE's built-in MCP server, as patterns:
+# an exact tool name, or a name ending in `*`. Anything matching nothing is
+# removed from `tools/list` and refused on `tools/call`, so a tool a later IDE
+# build adds cannot arrive unreviewed.
 #
-# Nothing that runs project-controlled code on the host is listed, and nothing
-# that addresses host state the sandbox could then reach. The project is writable
-# from the sandbox, so the project is the payload: a build runs its tooling, a
-# lint or reformat its configured tool, a run configuration a script the sandbox
-# wrote in, and `execute_sql_query` its configured database. A Jupyter kernel is
-# the same shape over a longer reach -- it holds live objects, and its interpreter
-# is a path the sandbox can write -- so the notebook tools are withheld too, along
-# with `configure_python_interpreter`. See "MCP tools" in ../README.md.
-#
-# `execute_tool` resolves a tool by name from its own argument, so it is listed to
-# keep the IDE's own routing working; a call through it is checked against these
-# same patterns, and exact names are preferred over a `*` pattern.
+# The project is writable from the sandbox, so it is the payload: a build, lint,
+# reformat, run configuration, `execute_sql_query` or terminal command runs
+# project-controlled code on the host, and a kernel does the same through an
+# interpreter path the sandbox can write. The notebook *file* tools stay, since
+# `.ipynb` writes reach no further than `apply_patch`; `execute_tool` names its
+# target in its own argument, so a call through it is checked against these same
+# patterns. See "MCP tools" in ../README.md.
 DEFAULT_ALLOW_TOOLS = (
     "analyze_calls",
     "apply_patch",

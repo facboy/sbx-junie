@@ -230,9 +230,11 @@ linters and formatters, `execute_run_configuration` a run point the sandbox writ
 as an executable script, and `execute_sql_query` a statement against a configured database;
 `execute_terminal_command` runs a shell command outright. A Jupyter kernel is the same shape over a
 longer reach — it holds live objects, and `configure_python_interpreter` names an interpreter path
-the sandbox can write — so the notebook tools are withheld too, the ones that evaluate code and the
-ones that only manage a kernel already running. A build belongs in the sandbox's own Docker engine,
-which the kit's base image carries, rather than on the host.
+the sandbox can write — so `run_notebook_cell`, `execute_code_on_kernel`, `interrupt_notebook` and
+`kill_notebook` are withheld too. The notebook *file* tools stay: `create_notebook`,
+`edit_notebook`, `read_notebook`, `read_notebook_cell` and `get_notebook_state` touch `.ipynb` files
+without executing anything, which is the reach `apply_patch` already has. A build belongs in the
+sandbox's own Docker engine, which the kit's base image carries, rather than on the host.
 
 Edit the list in a config file rather than in the unit's `ExecStart`, at
 `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — the same root `setup-junie-sbx.sh` puts its

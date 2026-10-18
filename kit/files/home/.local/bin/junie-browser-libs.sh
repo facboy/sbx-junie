@@ -3,18 +3,15 @@
 # Register the host's copies of Chromium's runtime libraries with the image's
 # loader.
 #
-# The browsers come from the host's Playwright cache, but the base image carries
-# none of the libraries they link, so `chrome` exits with "error while loading
-# shared libraries: libglib-2.0.so.0". A host that can run Chromium has those
-# libraries already -- Playwright checks for them on the host and prints the apt
-# command when they are absent -- so they are read from there rather than
-# installed here.
+# The base image carries none of the libraries the browsers from the host's
+# Playwright cache link, so `chrome` exits with "error while loading shared
+# libraries: libglib-2.0.so.0". A host that can run Chromium has them, and
+# Playwright prints the apt command when it does not.
 #
-# Only names the image cannot resolve are registered. A host libc.so.6 or
-# libm.so.6 on the loader's path is fatal: every binary in the image dies before
-# it starts with "undefined symbol __nptl_change_stack_perm, version
-# GLIBC_PRIVATE". The host script keeps those out of the mount and the check
-# below keeps them out again, so this path cannot shadow the image's own.
+# Only names the image cannot resolve are registered: a host libc.so.6 or
+# libm.so.6 on the loader's path is fatal (every binary dies with "undefined
+# symbol __nptl_change_stack_perm, version GLIBC_PRIVATE"), so the host script
+# keeps those out of the mount and the check below keeps them out again.
 
 set -eu
 
