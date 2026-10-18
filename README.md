@@ -94,19 +94,10 @@ supply: the base image carries almost none of them, and `chrome` exits with
 by [`kit/Dockerfile`](kit/Dockerfile), which runs Playwright's own `install-deps` for the pinned
 release so the package names follow the distro rather than a list kept by hand.
 
-That covers Chromium, Firefox and WebKit. Things the resolver does not, because they are read from
-disk at run time rather than linked:
-
-- **DRI drivers.** Headless WebKit renders through EGL, loaded by path from a driver directory rather
-  than by soname, and without a software rasteriser it aborts with
-  `Could not create EGL display: no supported platform available`.
-- **Fonts**, which fontconfig enumerates; with none, text measures as zero-width.
-- **ICU 74 and `libxml2.so.2`**, taken from noble and extracted rather than installed. WebKit
-  publishes one bundle per distro, and a host cache populated under 24.04 holds one that links those
-  by soname. This base ships ICU 78 and `libxml2.so.16` instead, and ICU embeds its major version in
-  every symbol name, so a newer ICU cannot satisfy an older link. Extracting the two — rather than
-  installing noble's `libxml2`, which would replace the image's own — lets such a cache run as-is. A
-  cache populated under this base's own distro needs none of it.
+That covers Chromium, Firefox and WebKit, and brings in what they read at run time rather than link: the
+DRI drivers headless WebKit renders through, without which it aborts with
+`Could not create EGL display: no supported platform available`, and the fonts fontconfig
+enumerates, without which text measures as zero-width.
 
 Consequences worth knowing:
 
@@ -115,9 +106,13 @@ Consequences worth knowing:
 - The dependency set tracks the Playwright release the image was built for (`PLAYWRIGHT_VERSION` in
   the Dockerfile). A host on a newer release works while that release needs nothing extra; one whose
   browsers start failing on a missing soname means the image is behind and wants a rebuild.
-- Only WebKit is distro-pinned tightly enough to matter: Playwright ships no WebKit for 26.04 before
-  `1.61`, so a project pinned below that cannot install a WebKit this image can run, no matter what
-  the image carries.
+- Only WebKit is distro-pinned tightly enough to matter. Playwright picks the 26.04 bundle from
+  `1.61` on, and that is the one this base can run; a project pinned below it installs the 24.04
+  WebKit, which links `libicu*.so.74` and `libxml2.so.2` against a base shipping ICU 78 and
+  `libxml2.so.16`, and ICU embeds its major version in every symbol name, so the older link cannot be
+  satisfied. `npx playwright install --force webkit` on the host at `1.61` or later replaces it: the
+  revision is unchanged between those bundles, so a plain install sees the directory complete and
+  leaves it alone.
 - Nothing about the library path can break from inside a running sandbox: there is no mount to go
   stale, which is why the earlier gather-and-register path is gone.
 
