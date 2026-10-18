@@ -1,4 +1,10 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
+# check=error=true
+#
+# A lint finding fails the build rather than being printed: `docker build --check` is
+# not something a rebuild runs by itself, and an undefined variable or a stage named
+# in caps is a mistake worth stopping for.
+#
 # Base image for the `junie` sandbox kit.
 #
 # The sandbox boots this instead of a bare template because a template carries
@@ -40,6 +46,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
  && npm uninstall -g playwright \
  && npm cache clean --force \
  && rm -rf /var/lib/apt/lists/*
+
+# Back to the base's own user: `USER root` above would otherwise be the last word,
+# and the spec's entrypoint runs as whoever this names.
+USER agent
 
 # Overrides the base's inherited flavor -- left alone it would report
 # "shell-docker" rather than this kit.

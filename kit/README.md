@@ -198,7 +198,7 @@ host-side.
 ## Base image
 
 A `kind: sandbox` kit *is* the whole environment, so it names the image the sandbox boots from. This
-fork builds `docker.io/sbx/junie-image` from the [`Dockerfile`](Dockerfile) beside this spec, on top of
+fork builds `docker.io/facboy/junie-sbx` from the [`Dockerfile`](Dockerfile) beside this spec, on top of
 `docker/sandbox-templates:shell-docker`: the standard sandbox toolchain plus a Docker engine, and no
 Junie in it. The engine is the sandbox's own, inside its VM — a sandbox has no path to the host's
 daemon — and the derived image keeps the base's `com.docker.sandboxes.start-docker=true`, which is

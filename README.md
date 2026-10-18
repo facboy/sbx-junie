@@ -6,7 +6,7 @@ Uses your user junie install, allows connection to IDE running on the host. The 
 described in [`kit/README.md`](kit/README.md); this file is the host side, and how to drive both.
 
 The kit builds your browsers' libraries into its image: the sandbox boots this fork's own
-`docker.io/facboy/junie-image`, built from [`kit/Dockerfile`](kit/Dockerfile) on top of
+`docker.io/facboy/junie-sbx`, built from [`kit/Dockerfile`](kit/Dockerfile) on top of
 `docker/sandbox-templates:shell-docker` — the standard toolchain plus a Docker engine for the
 sandbox's own VM. The CLI comes from the host mount, as do the browsers themselves; the image
 carries what they link ([Browser libraries](#browser-libraries)).

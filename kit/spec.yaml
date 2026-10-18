@@ -14,7 +14,7 @@ sandbox:
   # by `junie-init.sh`. What the image adds is the libraries the host's Playwright
   # browsers link, which no template carries and which a mount cannot supply --
   # see "Browser libraries" in README.md.
-  image: docker.io/facboy/junie-image:latest
+  image: docker.io/facboy/junie-sbx:latest
   entrypoint:
     - junie
 agentInstructions:
