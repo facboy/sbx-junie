@@ -55,20 +55,38 @@ batched, notification, chunked, dispatcher-targeted, malformed): every withheld 
 refused and never reaches the IDE, every allowed shape is forwarded byte for byte, and the
 same table against the previous revision fails five cases.
 
-### 2. A streamed response leaks the unfiltered tool list and wedges the response side
+### 2. A streamed response leaked the unfiltered tool list and wedged the response side — fixed
 
-`forward_responses` treats an event-stream reply as "pass through and `break`" while
+`forward_responses` treated an event-stream reply as "pass through and `break`" while
 holding `write_lock` for the life of the stream. Reproduced against a fake IDE:
 
 - With the session's `GET /stream` open, a later `tools/list` reply on the same connection
-  arrives at the client verbatim, `execute_terminal_command` included. The listing scrub
-  is disabled for the whole session, not just for the stream.
-- `refuse`'s own reply takes the same lock, so a refused call issued while a stream is
-  open never answers the client; it waits until the client gives up.
+  arrived at the client verbatim, `execute_terminal_command` included. The listing scrub
+  was disabled for the whole session, not just for the stream.
+- `refuse`'s own reply took the same lock, so a refused call issued while a stream was
+  open never answered the client; it waited until the client gave up.
 
-The lock is held across an unbounded loop; both writers only need it for a `sendall`
-burst. Separately, an idle stream is torn down after `IDLE_TIMEOUT` (600 s) with no way
-for the CLI to tell that from a dead IDE.
+The lock was held across an unbounded loop while both writers only need it for a
+`sendall` burst. Separately, an idle stream was torn down after `IDLE_TIMEOUT` with no way
+for the CLI to tell that from a dead IDE — and a splice did not end when either peer did,
+so a closed client left both threads and the IDE's connection held.
+
+The stream is now forwarded chunk by chunk, so its terminator ends the body and the
+connection carries on: the `tools/list` reply after it is framed as a reply and scrubbed,
+and the lock is taken per burst, so a refusal reaches the client while the stream is open.
+`HttpConnection` reads through a short `select` poll rather than the whole budget, which
+lets a caller tell a quiet session from a lost peer; an open stream suspends the idle
+budget entirely, since a stream is the session's own channel rather than a lull. A body
+that pauses mid-message is retried rather than restarted, so a large reply survives a slow
+reader. Teardown ends both directions when the IDE goes away or a half-closed client's
+reply never arrives, while a client that only half-closes still receives its reply.
+
+Verified against fake peers: events and a following `tools/list` reply both reach the
+client with the withheld tool scrubbed; a refusal arrives while the stream is open and is
+never forwarded; the stream's terminator is passed on and the session continues; an open
+stream survives a quiet budget while a stream-less session is closed at it; a 1.6 MB reply
+is delivered byte for byte to a slow reader; and both directions end when either peer
+goes away.
 
 ### 3. `junie-tty-filter.py` loses the CLI's exit status and hangs on non-tty stdin
 
@@ -191,8 +209,7 @@ into the log.
 
 ## Priority
 
-1. ~~The three allowlist holes~~ — done in `bin/junie-ide-relayd`; the lock held across a
-   stream is still open.
+1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`.
 2. The exit status and stdin EOF in `junie-tty-filter.py`, which silently break `--task`.
 3. Idempotent, non-interactive home init in `junie-sbx.sh`; the missing bindfs presence
    check in `setup-junie-sbx.sh`.

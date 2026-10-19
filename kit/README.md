@@ -141,8 +141,11 @@ notice. The same relay carries it:
   checked against the same list. Every shape a call arrives in is read: a batch is checked member
   by member, a notification is answered like a request, a chunked body is decoded before it is
   parsed, and a request body that will not parse is answered with an error instead of forwarded.
-  The session's `GET /stream` reply is passed through as it arrives, since it stays open for the
-  life of the session.
+  The session's `GET /stream` reply is forwarded chunk by chunk, so its terminator ends the body
+  rather than the connection: the replies the CLI asks for on that connection are still filtered,
+  and a refusal reaches it while the stream is open. An open stream suspends the daemon's idle
+  budget, so a quiet session is not cut while the agent thinks; a session with no stream open is
+  closed once it has seen no traffic for that budget.
 - The list itself comes from a TOML config file at
   `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — one host-wide file, since the daemon
   serves every sandbox — written as `allow_tools = ["apply_patch", "get_*"]`. The daemon needs no

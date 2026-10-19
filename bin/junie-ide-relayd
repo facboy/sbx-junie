@@ -26,7 +26,17 @@ a later IDE build adds arrives unreviewed rather than unrestricted. Every shape 
 call can arrive in is checked -- a batch is read member by member, a notification
 is answered like a request, a chunked body is decoded before it is read -- and a
 request body the daemon cannot parse is answered rather than forwarded, since it
-names no tool to check. The RPC relay above is left a plain splice.
+names no tool to check.
+
+A session's `GET /stream` stays open for the life of the session, and the CLI
+sends its requests on the same connection while nothing is written to that
+stream. So the stream is forwarded chunk by chunk, its terminator ends the body
+and the replies after it are filtered as replies, and the write lock is taken
+per burst rather than held for the stream: a refusal or a `tools/list` reply
+still reaches the client while the stream is open. An open stream is also what
+keeps the idle budget from closing the connection; once it ends, a session with
+no traffic for `IDLE_TIMEOUT` is closed. The RPC relay above is left a plain
+splice.
 
 Every preamble but `health` carries the sandbox's secret, which `junie-sbx.sh`
 provisions as it starts the sandbox: one record per project under
@@ -84,6 +94,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 import tomllib
 
 DEFAULT_PORT = 27183
@@ -153,7 +164,21 @@ REFUSED_REPLY = ('{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,'
 PARSE_ERROR_REPLY = (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
                      b'"message":"Request body could not be read"}}')
 MAX_PREAMBLE = 256
+# How long a session with no stream open may go without traffic before it is
+# closed. A session's stream is quiet for long stretches while the agent thinks,
+# which is why an open one suspends this rather than counting against it.
 IDLE_TIMEOUT = 600
+# How often a splice wakes to re-check that budget. Reads wait in `select` for
+# this long rather than for the whole budget, so a stream that is open but quiet
+# is told apart from a session that has gone away. Writes keep the socket's own
+# `IDLE_TIMEOUT`, since a reply larger than the socket buffer drains at the
+# client's pace.
+POLL_TIMEOUT = 30
+# How long the reply to a client that has stopped writing may still arrive
+# before the session is closed. The client's EOF is a half-close -- it may still
+# be reading -- so the splice cannot end on it immediately, and waiting on an
+# IDE that will never answer is what holds the connection open.
+REAP_TIMEOUT = 60
 
 
 def resolve_instances(explicit):
@@ -563,13 +588,26 @@ class HttpConnection:
     The message boundary matters because the payload either side of it is
     opaque: a buffered reader that ran past it would hand the next message's
     first line to the caller as if it were body.
+
+    `timed_out` records that the socket went quiet for a whole poll rather than
+    ending, which is what an idle session and a dead IDE look like from here. A
+    poll is shorter than the session's budget, so a caller can tell a lull from a
+    lost peer and wait out the budget itself.
     """
 
     def __init__(self, sock):
         self.sock = sock
         self.buffer = b""
+        self.timed_out = False
 
     def fill(self):
+        try:
+            readable, _, _ = select.select([self.sock], [], [], POLL_TIMEOUT)
+        except (OSError, ValueError):
+            return False
+        if not readable:
+            self.timed_out = True
+            return False
         try:
             data = self.sock.recv(65536)
         except OSError:
@@ -588,17 +626,17 @@ class HttpConnection:
         self.buffer = rest
         return head + b"\r\n\r\n"
 
-    def read_line(self):
-        while b"\r\n" not in self.buffer:
-            if not self.fill():
-                return None
-        line, _, rest = self.buffer.partition(b"\r\n")
-        self.buffer = rest
-        return line
-
     def read_exact(self, count):
+        """`count` bytes, or None when they do not arrive.
+
+        Nothing is consumed on a short read, so a body that pauses does not lose
+        the bytes already buffered for it: a timeout leaves the connection as it
+        was for the caller to retry, and an EOF leaves nothing to retry.
+        """
         while len(self.buffer) < count and self.fill():
             pass
+        if len(self.buffer) < count:
+            return None
         data, self.buffer = self.buffer[:count], self.buffer[count:]
         return data
 
@@ -606,24 +644,62 @@ class HttpConnection:
         """A chunked body as the raw bytes that frame it, or None if malformed."""
         raw = []
         while True:
-            line = self.read_line()
-            if line is None:
+            frame = self.read_chunk_frame()
+            if frame is None:
                 return None
-            raw.append(line + b"\r\n")
-            try:
-                size = int(line.split(b";", 1)[0].strip() or b"0", 16)
-            except ValueError:
-                return None
-            if size == 0:
-                while True:
-                    trailer = self.read_line()
-                    if trailer in (None, b""):
-                        break
-                    raw.append(trailer + b"\r\n")
-                raw.append(b"\r\n")
+            data, last = frame
+            raw.append(data)
+            if last:
                 return b"".join(raw)
-            raw.append(self.read_exact(size))
-            raw.append(self.read_exact(2))
+
+    def read_chunk_frame(self):
+        """One chunk of a chunked body, its framing included.
+
+        Returns `(frame, last)`, where `last` is set for the terminating chunk
+        and its trailers, or None when no whole chunk arrives. A frame is only
+        consumed once all of it is present, so a body that pauses between chunks
+        is forwarded as it arrives rather than lost: framing one chunk at a time
+        is what lets a stream be passed on without waiting for its end.
+        """
+        while True:
+            parsed = self.parse_chunk_frame()
+            if parsed is not None:
+                frame, last, consumed = parsed
+                if frame is None:
+                    return None
+                self.buffer = self.buffer[consumed:]
+                return frame, last
+            if not self.fill():
+                return None
+
+    def parse_chunk_frame(self):
+        """The (frame, last, bytes) a whole chunk at the buffer's start takes up.
+
+        Returns None while the chunk is incomplete, and (None, False, 0) when its
+        framing cannot be read at all.
+        """
+        end = self.buffer.find(b"\r\n")
+        if end < 0:
+            return None
+        try:
+            size = int(self.buffer[:end].split(b";", 1)[0].strip() or b"0", 16)
+        except ValueError:
+            return None, False, 0
+        if size == 0:
+            index = end + 2
+            while True:
+                stop = self.buffer.find(b"\r\n", index)
+                if stop < 0:
+                    return None
+                if stop == index:
+                    return self.buffer[:stop + 2], True, stop + 2
+                index = stop + 2
+        stop = end + 2 + size + 2
+        if len(self.buffer) < stop:
+            return None
+        if self.buffer[stop - 2:stop] != b"\r\n":
+            return None, False, 0
+        return self.buffer[:stop], False, stop
 
 
 def parse_head(head):
@@ -658,9 +734,8 @@ def is_bounded(head, headers):
     """Whether a response ends by itself, rather than streaming until close.
 
     A declared length, or a terminating chunk, ends the body. `GET /stream` is
-    the session's server-to-client channel: it is chunked for the life of the
-    session and ends only when the session does, so a chunked body is not
-    bounded on its own and the stream has to be passed through as it arrives.
+    the session's server-to-client channel: it stays open for the life of the
+    session, so neither framing bounds it and it is passed through as it arrives.
     """
     if is_event_stream(headers):
         return False
@@ -795,7 +870,7 @@ def decode_chunked(raw):
             return None
         if size == 0:
             return bytes(payload)
-        if len(rest) < size + 2:
+        if len(rest) < size + 2 or rest[size:size + 2] != b"\r\n":
             return None
         payload += rest[:size]
         rest = rest[size + 2:]
@@ -957,7 +1032,7 @@ def splice_mcp(client, upstream, allow):
 
     One thread per direction, because the response side is not driven by the
     request side's read loop: the session's `GET /stream` response stays open
-    while the client sends nothing on it.
+    while the client sends its requests on the same connection.
 
     `allow` is None when the filter is off, which is not the same as an empty
     list: an empty list names no tool, so every call is refused. Only None
@@ -965,9 +1040,58 @@ def splice_mcp(client, upstream, allow):
     """
     client_conn, upstream_conn = HttpConnection(client), HttpConnection(upstream)
     write_lock = threading.Lock()
-    session = {}
+    session = {"last": time.monotonic()}
+    finished = threading.Event()
 
-    def refuse(message):
+    def note_activity():
+        session["last"] = time.monotonic()
+
+    def idle():
+        """Whether the session is over: silent for `IDLE_TIMEOUT`, no stream open.
+
+        A stream is not a lull: it is the session's own channel, held open for as
+        long as the IDE lives, so an open one keeps the budget from applying.
+        """
+        if session.get("streaming"):
+            return False
+        return time.monotonic() - session["last"] >= IDLE_TIMEOUT
+
+    def half_close(sock):
+        """Close one direction, so the other keeps carrying what is in flight.
+
+        A client that sends a request and then shuts down its write side must
+        still receive the reply, so an EOF is propagated as a half-close rather
+        than a teardown.
+        """
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    def stop():
+        """End both directions, for the peer that ends the whole session."""
+        finished.set()
+        for sock in (client, upstream):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def reap_after_grace():
+        """Tear the splice down if a half-closed client's reply never comes.
+
+        A client that stops writing has not necessarily stopped reading, so the
+        reply still has to be delivered; `REAP_TIMEOUT` is how long that may
+        take before the session is treated as over. Without it, a client that
+        closed would leave these two threads and the IDE's connection held open
+        for as long as the daemon runs.
+        """
+        timer = threading.Timer(REAP_TIMEOUT, stop)
+        timer.daemon = True
+        session["reaper"] = timer
+        timer.start()
+
+    def refused_reply(message):
         """The reply body refusing a withheld tool, or None to forward it.
 
         An unanswered notification is refused the same way as a request: the IDE
@@ -990,100 +1114,186 @@ def splice_mcp(client, upstream, allow):
         the rest.
         """
         for call in calls:
-            refusal = refuse(call)
-            if refusal is not None:
-                return refusal
+            body = refused_reply(call)
+            if body is not None:
+                return body
+        return None
+
+    def read_body_or_lull(conn, headers):
+        """A body, or None once the connection ends or the session goes idle.
+
+        A read that times out partway through a body is a lull rather than an
+        end, so the read carries on until the body completes or the session is
+        over. The chunks are accumulated here rather than in `read_chunked`, so a
+        body that pauses between chunks is not restarted from its first one.
+        """
+        if b"chunked" not in headers.get(b"transfer-encoding", b"").lower():
+            while not finished.is_set():
+                body = read_body(conn, headers)
+                if body is not None:
+                    return body
+                if not conn.timed_out:
+                    return None
+                conn.timed_out = False
+                if idle():
+                    return None
+            return None
+        raw = []
+        while not finished.is_set():
+            frame = conn.read_chunk_frame()
+            if frame is not None:
+                data, last = frame
+                raw.append(data)
+                if last:
+                    return b"".join(raw)
+                continue
+            if not conn.timed_out:
+                return None
+            conn.timed_out = False
+            if idle():
+                return None
         return None
 
     def forward_requests():
-        while True:
-            head = client_conn.read_head()
-            if head is None:
-                try:
-                    upstream.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-                return
-            _, headers = parse_head(head)
-            body = read_body(client_conn, headers)
-            if body is None:
-                return
-            if body and allow is not None:
-                # A chunked body arrives still framed and a batch arrives as a
-                # list; both are decoded here, and a message the filter cannot
-                # read is answered rather than forwarded -- forwarding it would
-                # run whatever calls it holds without checking them.
-                message = read_message(head, body)
-                if message is None:
-                    reply = refused_head(session.get("id"), PARSE_ERROR_REPLY,
-                                         b"400 Bad Request")
-                else:
-                    refusal = first_refusal(tool_calls(message))
-                    if refusal is None:
-                        reply = None
-                    else:
-                        # A batch is answered with a batch, as JSON-RPC asks.
-                        reply = refused_head(
-                            session.get("id"),
-                            b"[" + refusal + b"]" if isinstance(message, list) else refusal)
-                if reply is not None:
-                    with write_lock:
-                        try:
-                            client.sendall(reply)
-                        except OSError:
-                            pass
+        try:
+            while not finished.is_set():
+                head = client_conn.read_head()
+                if head is None:
+                    if not client_conn.timed_out:
+                        # The client is done sending: the response side still
+                        # has its reply to deliver.
+                        half_close(upstream)
+                        reap_after_grace()
+                        return
+                    client_conn.timed_out = False
+                    if idle():
+                        return
                     continue
-            try:
-                upstream.sendall(head + body)
-            except OSError:
-                return
+                note_activity()
+                _, headers = parse_head(head)
+                body = read_body_or_lull(client_conn, headers)
+                if body is None:
+                    return
+                if body and allow is not None:
+                    # A chunked body arrives still framed and a batch arrives as
+                    # a list; both are decoded here, and a message the filter
+                    # cannot read is answered rather than forwarded -- forwarding
+                    # it would run whatever calls it holds without checking them.
+                    message = read_message(head, body)
+                    if message is None:
+                        reply = refused_head(session.get("id"), PARSE_ERROR_REPLY,
+                                             b"400 Bad Request")
+                    else:
+                        refusal = first_refusal(tool_calls(message))
+                        if refusal is None:
+                            reply = None
+                        else:
+                            # A batch is answered with a batch, as JSON-RPC asks.
+                            reply = refused_head(
+                                session.get("id"),
+                                b"[" + refusal + b"]" if isinstance(message, list) else refusal)
+                    if reply is not None:
+                        with write_lock:
+                            try:
+                                client.sendall(reply)
+                            except OSError:
+                                return
+                        continue
+                if finished.is_set():
+                    return
+                try:
+                    upstream.sendall(head + body)
+                except OSError:
+                    # The IDE is gone, so nothing will answer this or anything
+                    # already in flight: the whole session ends here.
+                    stop()
+                    return
+        except OSError:
+            pass
+
+    def send_locked(data):
+        """Write to the client with the lock held for this write alone.
+
+        A stream stays open for the life of the session, so the lock is taken per
+        burst rather than around the pump: a refusal or an ordinary reply still
+        reaches the client while the stream is open.
+        """
+        with write_lock:
+            client.sendall(data)
+
+    def pump_stream(head, headers):
+        """Forward a stream as it arrives; True when its body ended.
+
+        A chunked stream is forwarded chunk by chunk, so its terminator ends the
+        body while the connection stays open: the replies the client asks for on
+        it afterwards are framed as replies and filtered as such. A body
+        delimited by the close is forwarded until the IDE closes, and reports
+        False, since nothing can follow it.
+
+        A read that times out is neither: the session is quiet, which is what an
+        agent thinking looks like. The pump waits until the stream ends, the
+        session is over, or the peer goes away.
+        """
+        send_locked(head)
+        chunked = b"chunked" in headers.get(b"transfer-encoding", b"").lower()
+        session["streaming"] = True
+        try:
+            while not finished.is_set():
+                if chunked:
+                    frame = upstream_conn.read_chunk_frame()
+                    if frame is None:
+                        if upstream_conn.timed_out:
+                            upstream_conn.timed_out = False
+                            continue
+                        return False
+                    data, last = frame
+                else:
+                    if not upstream_conn.buffer and not upstream_conn.fill():
+                        if upstream_conn.timed_out:
+                            upstream_conn.timed_out = False
+                            continue
+                        return False
+                    data, upstream_conn.buffer = upstream_conn.buffer, b""
+                    last = False
+                note_activity()
+                send_locked(data)
+                if last:
+                    return True
+            return False
+        finally:
+            session["streaming"] = False
 
     def forward_responses():
         try:
-            while True:
+            while not finished.is_set():
                 head = upstream_conn.read_head()
                 if head is None:
-                    break
+                    if not upstream_conn.timed_out:
+                        return
+                    upstream_conn.timed_out = False
+                    if idle():
+                        return
+                    continue
+                note_activity()
                 _, headers = parse_head(head)
                 session_id = headers.get(b"mcp-session-id")
                 if session_id:
                     session["id"] = session_id.decode("ascii", "replace")
                 if not is_bounded(head, headers):
-                    # A stream is passed through as it arrives, and its first
-                    # bytes may already sit past the message boundary.
-                    with write_lock:
-                        client.sendall(head)
-                        if upstream_conn.buffer:
-                            client.sendall(upstream_conn.buffer)
-                            upstream_conn.buffer = b""
-                        while True:
-                            try:
-                                data = upstream.recv(65536)
-                            except OSError:
-                                break
-                            if not data:
-                                break
-                            try:
-                                client.sendall(data)
-                            except OSError:
-                                break
-                    break
-                body = read_body(upstream_conn, headers)
+                    if not pump_stream(head, headers):
+                        return
+                    continue
+                body = read_body_or_lull(upstream_conn, headers)
                 if body is None:
-                    break
+                    return
                 replaced = filtered_response(head, body, allow) if allow is not None else None
-                with write_lock:
-                    client.sendall(head + body if replaced is None else b"".join(replaced))
+                send_locked(head + body if replaced is None else b"".join(replaced))
         except OSError:
             pass
         finally:
-            # The IDE has stopped answering, so the client is told the same way
-            # a half-close tells it: its own write side stays open, so a request
-            # already in flight is not cut off mid-send.
-            try:
-                client.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
+            # The IDE has stopped answering, so the session is over: the client
+            # is told, and the request side stops waiting on it.
+            stop()
 
     threads = [threading.Thread(target=forward_requests, daemon=True),
                threading.Thread(target=forward_responses, daemon=True)]
@@ -1091,6 +1301,9 @@ def splice_mcp(client, upstream, allow):
         thread.start()
     for thread in threads:
         thread.join()
+    reaper = session.get("reaper")
+    if reaper is not None:
+        reaper.cancel()
     client.close()
     upstream.close()
 
