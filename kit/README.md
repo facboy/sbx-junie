@@ -138,9 +138,11 @@ notice. The same relay carries it:
   without executing anything, which is the reach `apply_patch` already has. A build belongs in the
   sandbox's own Docker engine, which the base image carries. `execute_tool` resolves a tool by name
   from its own argument, so it is allowlisted to keep the routing working and a call through it is
-  checked against the same list.
-  Both the request path and the session's `GET /stream` are framed; a streamed reply is passed
-  through as it arrives, since it stays open for the life of the session.
+  checked against the same list. Every shape a call arrives in is read: a batch is checked member
+  by member, a notification is answered like a request, a chunked body is decoded before it is
+  parsed, and a request body that will not parse is answered with an error instead of forwarded.
+  The session's `GET /stream` reply is passed through as it arrives, since it stays open for the
+  life of the session.
 - The list itself comes from a TOML config file at
   `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relayd.toml` — one host-wide file, since the daemon
   serves every sandbox — written as `allow_tools = ["apply_patch", "get_*"]`. The daemon needs no

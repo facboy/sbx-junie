@@ -22,8 +22,11 @@ since the port moves when the IDE restarts.
 The MCP exchange is parsed rather than spliced byte for byte, so that only the
 tools the sandbox needs reach the host: see `splice_mcp`. A tool the allowlist
 does not name is removed from `tools/list` and refused on `tools/call`, so a tool
-a later IDE build adds arrives unreviewed rather than unrestricted. The RPC
-relay above is left a plain splice.
+a later IDE build adds arrives unreviewed rather than unrestricted. Every shape a
+call can arrive in is checked -- a batch is read member by member, a notification
+is answered like a request, a chunked body is decoded before it is read -- and a
+request body the daemon cannot parse is answered rather than forwarded, since it
+names no tool to check. The RPC relay above is left a plain splice.
 
 Every preamble but `health` carries the sandbox's secret, which `junie-sbx.sh`
 provisions as it starts the sandbox: one record per project under
@@ -145,6 +148,10 @@ DISPATCHER_TOOL = "execute_tool"
 TOOL_LIST_MARKER = "Available tools: "
 REFUSED_REPLY = ('{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,'
                  '"message":"Tool \'%s\' is not available"}}')
+# A request body the filter cannot read names no tool it can check, so it is
+# answered rather than forwarded: forwarding it would run whatever it holds.
+PARSE_ERROR_REPLY = (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
+                     b'"message":"Request body could not be read"}}')
 MAX_PREAMBLE = 256
 IDLE_TIMEOUT = 600
 
@@ -702,7 +709,13 @@ def refused_tool(params, allow):
     well: the tool name has to appear there literally for the dispatcher to
     resolve it, which is what makes its first word enough. A dispatcher call
     whose command cannot be read names nothing to check, and is refused.
+
+    `params` is whatever the client sent, so a call shaped otherwise than the
+    schema says is refused rather than raised on: it names a tool the filter
+    cannot read, which is not the same as a tool it allows.
     """
+    if not isinstance(params, dict):
+        return DISPATCHER_TOOL
     name = params.get("name")
     if not isinstance(name, str):
         return DISPATCHER_TOOL
@@ -710,7 +723,8 @@ def refused_tool(params, allow):
         return name
     if name != DISPATCHER_TOOL:
         return None
-    command = (params.get("arguments") or {}).get("command")
+    arguments = params.get("arguments")
+    command = arguments.get("command") if isinstance(arguments, dict) else None
     if not isinstance(command, str):
         return DISPATCHER_TOOL
     words = command.strip().split()
@@ -883,6 +897,55 @@ def reply_mcp_port(conn, instances_dir, digest):
     conn.close()
 
 
+def decode_body(head, body):
+    """The message `body`, its framing removed, or None when it cannot be read.
+
+    `read_body` returns a chunked body still framed, since that is what has to be
+    forwarded on; a caller that needs the message itself strips the framing here.
+    """
+    if b"chunked" in parse_head(head)[1].get(b"transfer-encoding", b"").lower():
+        return decode_chunked(body)
+    return body
+
+
+def read_message(head, body):
+    """The JSON message `body` carries, decoded and unframed, or None.
+
+    A body the filter cannot read names no tool it can check, so the caller
+    answers it rather than forwarding it. An empty body is `{}`: it names no
+    tool either, but there is nothing wrong with it to answer.
+    """
+    content = decode_body(head, body)
+    if content is None:
+        return None
+    if not content.strip():
+        return {}
+    try:
+        return json.loads(content)
+    except ValueError:
+        return None
+
+
+def tool_calls(message):
+    """The `tools/call` requests a parsed message holds, singly or in a batch."""
+    if isinstance(message, dict):
+        members = [message]
+    elif isinstance(message, list):
+        members = message
+    else:
+        return []
+    return [member for member in members
+            if isinstance(member, dict) and member.get("method") == "tools/call"]
+
+
+def refused_head(session_id, body, status=b"200 OK"):
+    """A reply head carrying `body`, with the session the client is on."""
+    head = b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\n"
+    if session_id:
+        head += b"mcp-session-id: " + session_id.encode() + b"\r\n"
+    return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+
 def splice_mcp(client, upstream, allow):
     """Splice the MCP exchange with everything outside `allow` removed.
 
@@ -905,24 +968,32 @@ def splice_mcp(client, upstream, allow):
     session = {}
 
     def refuse(message):
-        # Only a tool call is checked: `initialize`, `tools/list` and the
-        # notifications name no tool, and the reply to `tools/list` is filtered
-        # on the way back instead.
+        """The reply body refusing a withheld tool, or None to forward it.
+
+        An unanswered notification is refused the same way as a request: the IDE
+        is not sent the call either, and a reply the client did not ask for is
+        the only way to say so. `id` is absent from a notification, so the reply
+        carries a null one.
+        """
         if message.get("method") != "tools/call":
             return None
-        request_id = message.get("id")
-        if request_id is None:
-            # A notification has no reply, and the IDE will not be sent the
-            # call either, so there is nothing to answer.
-            return None
-        name = refused_tool(message.get("params") or {}, allow)
+        name = refused_tool(message.get("params"), allow)
         if name is None:
             return None
-        body = (REFUSED_REPLY % (json.dumps(request_id), name)).encode()
-        head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-        if session.get("id"):
-            head += b"mcp-session-id: " + session["id"].encode() + b"\r\n"
-        return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
+        return (REFUSED_REPLY % (json.dumps(message.get("id")), name)).encode()
+
+    def first_refusal(calls):
+        """The reply refusing the first call outside `allow`, or None.
+
+        A batch holding one is held back whole: the IDE is never asked to run a
+        member the list withholds, and a batch has no way to drop one and keep
+        the rest.
+        """
+        for call in calls:
+            refusal = refuse(call)
+            if refusal is not None:
+                return refusal
+        return None
 
     def forward_requests():
         while True:
@@ -938,19 +1009,30 @@ def splice_mcp(client, upstream, allow):
             if body is None:
                 return
             if body and allow is not None:
-                try:
-                    message = json.loads(body)
-                except ValueError:
-                    message = None
-                if isinstance(message, dict) and isinstance(message.get("method"), str):
-                    refusal = refuse(message)
-                    if refusal is not None:
-                        with write_lock:
-                            try:
-                                client.sendall(refusal)
-                            except OSError:
-                                pass
-                        continue
+                # A chunked body arrives still framed and a batch arrives as a
+                # list; both are decoded here, and a message the filter cannot
+                # read is answered rather than forwarded -- forwarding it would
+                # run whatever calls it holds without checking them.
+                message = read_message(head, body)
+                if message is None:
+                    reply = refused_head(session.get("id"), PARSE_ERROR_REPLY,
+                                         b"400 Bad Request")
+                else:
+                    refusal = first_refusal(tool_calls(message))
+                    if refusal is None:
+                        reply = None
+                    else:
+                        # A batch is answered with a batch, as JSON-RPC asks.
+                        reply = refused_head(
+                            session.get("id"),
+                            b"[" + refusal + b"]" if isinstance(message, list) else refusal)
+                if reply is not None:
+                    with write_lock:
+                        try:
+                            client.sendall(reply)
+                        except OSError:
+                            pass
+                    continue
             try:
                 upstream.sendall(head + body)
             except OSError:
