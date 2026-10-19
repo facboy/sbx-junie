@@ -1,15 +1,19 @@
-# Fragmented SGR mouse report is typed into the prompt
+# A fragmented input sequence is typed into the prompt
 
 Junie CLI 3659.7, Linux, in a sandbox whose terminal is reached through an extra
 PTY hop. Hovering the mouse over the prompt leaves fragments such as `;20;8M` as
-literal text in the input buffer.
+literal text in the input buffer, and typing keys the kitty keyboard protocol
+encodes — Enter among them — can leave `13u` behind while the key itself does
+nothing.
 
 ## Reproduction
 
 1. Run the TUI in a terminal whose PTY delivers input in more than one chunk,
-   with mouse reporting active (`ESC[?1003h`, which the TUI enables).
-2. Move the mouse over the prompt so hover reports arrive continuously.
-3. An incomplete report is occasionally read, and its tail is inserted as typing.
+   with mouse reporting active (`ESC[?1003h`, which the TUI enables) or the kitty
+   keyboard protocol in use.
+2. Move the mouse over the prompt, or press Enter.
+3. An incomplete sequence is occasionally read, and its tail is inserted as
+   typing.
 
 Not deterministic: the failure needs an inter-byte gap that exceeds the reader's
 timeout, which happens when the PTY fragments under load.
@@ -34,6 +38,12 @@ From the log with `-Djunie.logging.debug.enabled=true`, one event:
 The report was `ESC[<35;20;8M`. The reader consumed `ESC[<35`, timed out, and the
 remaining `;20;8M` was read as six typed characters.
 
+Enter reaches the prompt the same way. The TUI turns the kitty keyboard protocol
+on, so a key press arrives as `ESC[<unicode>;<modifiers>u` rather than as a byte:
+Enter is `ESC[13u`. Split as `ESC[` and `13u`, the prefix is read as a bare
+Escape, which clears the prompt, and `13u` is inserted as text — the key itself
+never arrives.
+
 ## Cause
 
 `KittyKeyboardHandler.readCSISequence` reads the sequence with a 50 ms timeout for
@@ -46,8 +56,8 @@ The collected string is then handed to `parseStandardCSI` and
 loop. The bytes already consumed are dropped, and the bytes that arrive afterwards
 are no longer part of any sequence, so they are inserted as text.
 
-The same report read in one chunk (the common case) parses correctly, which is why
-this only appears intermittently.
+The same sequence read in one chunk (the common case) parses correctly, which is
+why this only appears intermittently.
 
 ## Suggested fixes
 
@@ -68,3 +78,11 @@ five event layers with `No handlers found for event=MouseMove`, and a
 `static=4272 ms` transcript rebuild during one such burst. Disabling motion
 reporting removes both the corruption and the stalls, which points at the same
 input path rather than the renderer.
+
+## Workaround in this kit
+
+`junie-tty-filter.py` runs the CLI on a PTY of its own, holds every byte the
+terminal sends until the input sequence it belongs to ends, and writes the
+sequence to the CLI in one piece. It also down-converts `ESC[?1003h` to
+`ESC[?1002l`, so the hover stream that produced most of the fragments never
+starts while click and drag reporting stays on.

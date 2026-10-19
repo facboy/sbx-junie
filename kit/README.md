@@ -227,11 +227,14 @@ is on, independent of anything this kit's egress policy allows.
 rather than from `file.encoding`. Unset, every non-ASCII character the TUI writes comes out as `?`.
 
 The last startup hook installs a wrapper over `~/.local/bin/junie` that runs the CLI on a PTY of its
-own and down-converts all-motion mouse reporting (`ESC[?1003h`) to `ESC[?1002l`. The CLI reads a mouse
-report with a 10 ms per-byte budget, so a report this PTY splits leaves its tail inserted into the
-prompt as typed text; refusing all-motion removes the hover stream that trips it. Clicks and drags
-still report. `docs/mouse-report-truncation.md` has the trace. Removing that hook, and
-`files/home/.local/bin/junie-mouse-filter.{sh,py}`, restores the plain CLI.
+own and hands it whole input sequences only. The CLI reads a sequence with a 10 ms per-byte budget,
+so one the PTY splits leaves its tail inserted into the prompt as typed text — `;20;8M` from a hover
+report, `13u` from Enter, since the kitty keyboard protocol encodes every key as a sequence. The
+wrapper holds each sequence until it ends and writes it in one piece, and down-converts all-motion
+mouse reporting (`ESC[?1003h`) to `ESC[?1002l`, a report per mouse movement being the stream behind
+those fragments and a burst of them stalling the TUI. Clicks and drags still report.
+`docs/fragmented-input-sequence.md` has the trace. Removing that hook, and
+`files/home/.local/bin/junie-tty-filter.{sh,py}`, restores the plain CLI.
 
 ## Cleanup
 

@@ -146,12 +146,67 @@ except Exception:
 # than reported on every tick.
 stale_daemon_reported=0
 
-# Whether pid $1 is still the endpoint this script started. A recorded pid can be
-# handed to an unrelated process once its endpoint dies, so it is confirmed
-# against its command line before anything signals it.
+# The value following flag $1 on the argv fed through stdin, one argument per
+# line.
+argument_after() {
+	awk -v want="$1" 'previous == want { print; exit } { previous = $0 }'
+}
+
+# Whether pid $1 is still the endpoint this script started for port $2, digest
+# $3, mirroring the IDE's MCP server when $4 is 1. A recorded pid can be handed
+# to an unrelated process once its endpoint dies -- and to another endpoint of
+# this script, which is how a record from before a sandbox restart came to name
+# a mirror that was never started -- so the arguments it was started with are
+# what confirm it, not the binary alone.
 is_our_endpoint() {
-	[ -r "/proc/$1/cmdline" ] || return 1
-	tr '\0' '.' <"/proc/$1/cmdline" 2>/dev/null | grep -q 'junie-ide-relay-endpoint'
+	endpoint_pid=$1
+	endpoint_port=$2
+	endpoint_digest=$3
+	endpoint_mcp=${4:-0}
+	[ -r "/proc/$endpoint_pid/cmdline" ] || return 1
+	endpoint_argv=$(tr '\0' '\n' <"/proc/$endpoint_pid/cmdline" 2>/dev/null) || return 1
+	case $endpoint_argv in
+	*'junie-ide-relay-endpoint.py'*) ;;
+	*) return 1 ;;
+	esac
+	[ "$(printf '%s\n' "$endpoint_argv" | argument_after --port)" = "$endpoint_port" ] || return 1
+	[ "$(printf '%s\n' "$endpoint_argv" | argument_after --digest)" = "$endpoint_digest" ] || return 1
+	if [ "$endpoint_mcp" = 1 ]; then
+		printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' || return 1
+	elif printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp'; then
+		return 1
+	fi
+	return 0
+}
+
+# Echo "<port> <pid>" for an endpoint already running for digest $1, mirroring the
+# IDE's MCP server when $2 is 1, or nothing. The record is the fast path, but it
+# is only a file: one lost, or one a restart left naming a pid this boot gave to
+# another process, would otherwise have the next pass start a second endpoint
+# that cannot bind the port the first one still holds.
+endpoint_for_digest() {
+	endpoint_digest=$1
+	endpoint_mcp=${2:-0}
+	for entry in /proc/[0-9]*; do
+		endpoint_pid=${entry#/proc/}
+		[ -r "/proc/$endpoint_pid/cmdline" ] || continue
+		endpoint_argv=$(tr '\0' '\n' <"/proc/$endpoint_pid/cmdline" 2>/dev/null) || continue
+		case $endpoint_argv in
+		*'junie-ide-relay-endpoint.py'*) ;;
+		*) continue ;;
+		esac
+		[ "$(printf '%s\n' "$endpoint_argv" | argument_after --digest)" = "$endpoint_digest" ] || continue
+		if [ "$endpoint_mcp" = 1 ]; then
+			printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' || continue
+		elif printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp'; then
+			continue
+		fi
+		endpoint_port=$(printf '%s\n' "$endpoint_argv" | argument_after --port)
+		[ -n "$endpoint_port" ] || continue
+		printf '%s %s\n' "$endpoint_port" "$endpoint_pid"
+		return 0
+	done
+	return 1
 }
 
 # The IDE's built-in MCP port, as "<outcome> [port]". The daemon resolves it by
@@ -192,8 +247,9 @@ except Exception:
 stop_mcp_mirror() {
 	record="$records_dir/mcp-$1"
 	[ -f "$record" ] || return 0
-	read -r _ endpoint_pid <"$record" || true
-	if [ -n "${endpoint_pid:-}" ] && is_our_endpoint "$endpoint_pid"; then
+	read -r recorded_port endpoint_pid <"$record" || true
+	if [ -n "${endpoint_pid:-}" ] &&
+		is_our_endpoint "$endpoint_pid" "${recorded_port:-}" "$1" 1; then
 		kill "$endpoint_pid" 2>/dev/null
 	fi
 	rm -f "$record"
@@ -213,11 +269,18 @@ relay_for_digest() {
 	if [ -f "$record" ]; then
 		read -r recorded_port recorded_pid <"$record" || true
 		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
-			is_our_endpoint "$recorded_pid"; then
+			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" 0; then
 			printf '%s %s\n' "$recorded_port" "$recorded_pid"
 			return 0
 		fi
 		rm -f "$record"
+	fi
+
+	if found=$(endpoint_for_digest "$digest" 0); then
+		set -- $found
+		printf '%s %s\n' "$1" "$2" >"$record"
+		printf '%s %s\n' "$1" "$2"
+		return 0
 	fi
 
 	offset=0
@@ -267,7 +330,7 @@ relay_mcp_for_digest() {
 	if [ -f "$record" ]; then
 		read -r recorded_port recorded_pid <"$record" || true
 		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
-			is_our_endpoint "$recorded_pid"; then
+			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" 1; then
 			if [ "$recorded_port" = "$mcp_port" ]; then
 				printf '%s %s\n' "$recorded_port" "$recorded_pid"
 				return 0
@@ -275,6 +338,18 @@ relay_mcp_for_digest() {
 			kill "$recorded_pid" 2>/dev/null
 		fi
 		rm -f "$record"
+	fi
+
+	if found=$(endpoint_for_digest "$digest" 1); then
+		set -- $found
+		if [ "$1" = "$mcp_port" ]; then
+			printf '%s %s\n' "$1" "$2" >"$record"
+			printf '%s %s\n' "$1" "$2"
+			return 0
+		fi
+		# Mirroring the port the IDE served before it restarted: nothing will
+		# use it again, and the bind below needs it back.
+		kill "$2" 2>/dev/null
 	fi
 
 	setsid python3 "$endpoint" --port "$mcp_port" --digest "$digest" --mcp \
@@ -382,8 +457,13 @@ relay_pass() {
 		digest=${name#mcp-}
 		grep -q "^$digest	" "$wanted" && continue
 		# The record is "<port> <pid>"; the pid is the field to signal.
-		read -r _ endpoint_pid <"$record" || true
-		if [ -n "${endpoint_pid:-}" ] && is_our_endpoint "$endpoint_pid"; then
+		read -r recorded_port endpoint_pid <"$record" || true
+		case $name in
+		mcp-*) mirror=1 ;;
+		*) mirror=0 ;;
+		esac
+		if [ -n "${endpoint_pid:-}" ] &&
+			is_our_endpoint "$endpoint_pid" "${recorded_port:-}" "$digest" "$mirror"; then
 			kill "$endpoint_pid" 2>/dev/null
 		fi
 		rm -f "$record"
