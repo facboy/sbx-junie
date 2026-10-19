@@ -108,6 +108,12 @@ environment:
     # Seals the shim's own auto-update check (it would otherwise poll
     # update-info.jsonl and stage a new build). User has to do this from the host.
     JUNIE_SKIP_UPDATE_CHECK: "1"
+    # The image ships only C, C.utf8 and POSIX, so a host's en_US.UTF-8 name
+    # resolves back to ASCII here and only C.UTF-8 is any use. Unset, the JVM
+    # takes ANSI_X3.4-1968 for the console and writes a ? for every non-ASCII
+    # character, which is the TUI's borders and any accented text.
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
 setup:
   startup:
     # Locates the host's IDE instance directory among the read-only workspaces

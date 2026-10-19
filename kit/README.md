@@ -222,6 +222,10 @@ create time.
 runtime auto-update check. Without it the shim polls for and stages a newer build of the channel it
 is on, independent of anything this kit's egress policy allows.
 
+`LANG` and `LC_ALL` pin `C.UTF-8` because the image ships only `C`, `C.utf8` and `POSIX`: a host's
+`en_US.UTF-8` resolves back to ASCII in here, and the JVM reads the console charset from the locale
+rather than from `file.encoding`. Unset, every non-ASCII character the TUI writes comes out as `?`.
+
 ## Cleanup
 
 Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote there
