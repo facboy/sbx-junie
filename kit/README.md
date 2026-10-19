@@ -230,9 +230,10 @@ The last startup hook installs a wrapper over `~/.local/bin/junie` that runs the
 own and hands it whole input sequences only. The CLI reads a sequence with a 10 ms per-byte budget,
 so one the PTY splits leaves its tail inserted into the prompt as typed text — `;20;8M` from a hover
 report, `13u` from Enter, since the kitty keyboard protocol encodes every key as a sequence. The
-wrapper holds each sequence until it ends and writes it in one piece, and down-converts all-motion
-mouse reporting (`ESC[?1003h`) to `ESC[?1002l`, a report per mouse movement being the stream behind
-those fragments and a burst of them stalling the TUI. Clicks and drags still report.
+wrapper holds each sequence until it ends and writes it in one piece, and rewrites `ESC[?1003h` to
+`ESC[?1002h`. The terminal treats tracking modes 1000, 1002 and 1003 as one setting, so that drops
+the report per mouse movement — the stream behind most of those fragments, and 6628 dispatches that
+found no handler in 14 minutes of hovering — while press, release and drag reports keep arriving.
 `docs/fragmented-input-sequence.md` has the trace. Removing that hook, and
 `files/home/.local/bin/junie-tty-filter.{sh,py}`, restores the plain CLI.
 

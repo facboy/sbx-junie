@@ -150,8 +150,9 @@ setup:
     # sequence at a time with a 10 ms per-byte budget, so a sequence the pty
     # splits leaves its tail inserted as typed text -- `;20;8M` from a hover
     # report, `13u` from Enter. The filter holds each sequence until it ends and
-    # writes it whole, and refuses all-motion reporting, which is the stream
-    # that produces those fragments. Clicks and drags still report.
+    # writes it whole, and rewrites `1003h` to `1002h`, so the per-movement
+    # reports behind those fragments stop while press, release and drag keep
+    # reporting.
     # The symlink is removed first because `cp` onto it would write through to
     # the read-only host mount and fail.
     - command:

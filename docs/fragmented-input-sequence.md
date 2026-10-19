@@ -83,6 +83,12 @@ input path rather than the renderer.
 
 `junie-tty-filter.py` runs the CLI on a PTY of its own, holds every byte the
 terminal sends until the input sequence it belongs to ends, and writes the
-sequence to the CLI in one piece. It also down-converts `ESC[?1003h` to
-`ESC[?1002l`, so the hover stream that produced most of the fragments never
-starts while click and drag reporting stays on.
+sequence to the CLI in one piece. That closes the corruption: pieces up to 60 ms
+apart are rejoined, against the CLI's own 10 ms budget.
+
+It also rewrites `ESC[?1003h` to `ESC[?1002h`. Reporting modes 1000, 1002 and 1003
+are one mutually exclusive setting in the terminal, so this drops the report per
+mouse movement while press, release and drag reports keep arriving. That is the
+load half of the problem rather than the corruption half: the hovering above cost
+6628 dispatches that found no handler — 6 per report, bursts of 546/s — where no
+mouse event ever matched a handler.

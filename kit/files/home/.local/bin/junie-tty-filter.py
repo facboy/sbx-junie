@@ -15,9 +15,12 @@ more for a moment is released as it stands, which is what a lone Escape needs.
 The outer terminal is put in raw mode rather than only partly: `ICRNL` would turn
 Enter's CR into a NL, and `IXON` would eat Ctrl-S and Ctrl-Q.
 
-Output is down-converted: `ESC[?1003h` becomes `ESC[?1003l`. All-motion
-reporting sends a report per mouse movement, and a burst of those stalls the TUI;
-click and drag reporting stays on.
+One output sequence is rewritten: `ESC[?1003h` becomes `ESC[?1002h`, and nothing
+else is touched. Mouse tracking modes 1000, 1002 and 1003 are one mutually
+exclusive setting in the terminal, so 1002 keeps press, release and drag reports
+and drops the report per mouse movement -- the stream behind most of the
+fragments, and 6628 dispatches that found no handler in 14 minutes of hovering.
+The `ESC[?1003l` the CLI sends on exit still turns tracking off.
 
 The CLI needs a pty rather than a pipe: JLine falls back to a dumb terminal when
 stdout is not a tty, and then the TUI writes nothing at all.
@@ -34,7 +37,7 @@ import time
 import tty
 
 ALL_MOTION_ON = b"\x1b[?1003h"
-ALL_MOTION_OFF = b"\x1b[?1003l"
+DRAG_REPORTING_ON = b"\x1b[?1002h"
 
 # How long a partial sequence waits for its final byte before it is passed on.
 HOLD_TIMEOUT = 0.05
@@ -204,7 +207,7 @@ def main(argv):
             data = data[:-len(held_output)]
             held_since = time.monotonic()
         if data:
-            out.write(data.replace(ALL_MOTION_ON, ALL_MOTION_OFF))
+            out.write(data.replace(ALL_MOTION_ON, DRAG_REPORTING_ON))
             out.flush()
 
     def flush_held_output():
