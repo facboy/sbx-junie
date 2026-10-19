@@ -181,14 +181,25 @@ is left alone. The previous revision needs a `y` on stdin and, given one, still 
 `${CONFIG_HOME}` — the `junie-sbx` directory itself rather than the XDG root the name
 promises — so leaving it in place would have misled the first script that did read it.
 
-### 7. The relay's `grep "^$digest\t"` is right only by accident
+### 7. The relay's `grep "^$digest\t"` is right only by accident — fixed
 
-This looked like a bug and is not: the source holds a literal tab in the pattern, which I
-checked byte by byte and by running the pass under `dash -x` — the record is kept and the
-endpoint survives. But it depends on an invisible byte. A formatter, an editor's trailing-
+This looked like a bug and is not: the source held a literal tab in the pattern, which I
+checked byte by byte and by running the pass under `dash -x` — the record was kept and the
+endpoint survived. But it depended on an invisible byte. A formatter, an editor's trailing-
 whitespace pass, or a copy through a JSON string turns `\t` into a literal `t`, and the
-cleanup loop then kills every live endpoint on every tick. A `grep -F` against a variable
-holding the tab, or a comment naming it, is what makes the intent readable.
+cleanup loop then kills every live endpoint on every tick.
+
+The separator is now `tab=$(printf '\t')`, and the two `IFS=` values and the four digest
+patterns name it. Nothing in the file's content holds a tab, so a whitespace pass cannot
+change what the patterns mean. `grep -F` would not have been enough: dropping the anchor
+lets a live digest match anywhere in a project path that ends in it, so the patterns kept
+`^` and use the variable instead.
+
+Verified by running the relay's two loops over fixtures in `dash` and `bash`: a recorded
+digest is skipped and an unrecorded one kept. Turn a literal tab into a `t` or a space and
+the same loops kill a live endpoint, which is the failure this avoids. A project path
+containing spaces still reads back as one field, and an `rstrip` pass leaves the file
+unchanged.
 
 ### 8. Unguarded failure paths in `bin/junie-ide-relayd`
 
@@ -255,7 +266,8 @@ into the log.
 3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. ~~The
    idempotent, non-interactive home init in `junie-sbx.sh`~~ — done.
 4. ~~`USER_CONFIG_HOME`~~ — done; dropped from `ENVS`.
-5. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
+5. ~~The relay's invisible-tab `grep`~~ — done; the separator is a variable.
+6. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
    preamble read timeout.
-6. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
+7. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
    and doc drift.

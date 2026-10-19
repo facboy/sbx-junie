@@ -34,6 +34,13 @@ relay_span="${JUNIE_IDE_RELAY_PORT_SPAN:-20}"
 endpoint="${JUNIE_IDE_ENDPOINT:-/home/agent/.local/bin/junie-ide-relay-endpoint.py}"
 interval="${JUNIE_IDE_WATCH_INTERVAL:-10}"
 
+# The field separator of the lists below, held in a variable so neither the `IFS`
+# value nor a pattern depends on an invisible byte in this file. A formatter, an
+# editor's trailing-whitespace pass, or a copy through a JSON string turns a
+# literal tab into spaces or a `t`; the digest patterns would then match nothing
+# and the stale-endpoint pass would kill every live endpoint on every tick.
+tab=$(printf '\t')
+
 # The secret `junie-sbx.sh` provisioned this sandbox with, for the project it
 # holds. Every preamble carries it, and the host daemon splices a connection only
 # when it matches the project of the IDE the digest names -- which is what stops
@@ -419,9 +426,9 @@ relay_pass() {
 		    print(hashlib.md5(project.encode()).hexdigest(), project, sep="\t")
 	PY
 
-	while IFS='	' read -r digest project; do
+	while IFS="$tab" read -r digest project; do
 		[ -n "$digest" ] || continue
-		grep -q "^$digest	" "$relays" && continue
+		grep -q "^$digest$tab" "$relays" && continue
 
 		if relay=$(relay_for_digest "$digest"); then
 			# `relay` is "<port> <pid>"; split it so the record is tab-separated
@@ -437,7 +444,7 @@ relay_pass() {
 	# mirror drops the listener it left on the old one. An outcome that frees the
 	# port -- `none` or `gone` -- stops the mirror, so one is not held for the
 	# IDE's port after the IDE gave it up.
-	while IFS='	' read -r digest project; do
+	while IFS="$tab" read -r digest project; do
 		[ -n "$digest" ] || continue
 		resolution=$(mcp_port_for_digest "$digest")
 		set -- $resolution
@@ -455,7 +462,7 @@ relay_pass() {
 		[ -f "$record" ] || continue
 		name=${record##*/}
 		digest=${name#mcp-}
-		grep -q "^$digest	" "$wanted" && continue
+		grep -q "^$digest$tab" "$wanted" && continue
 		# The record is "<port> <pid>"; the pid is the field to signal.
 		read -r recorded_port endpoint_pid <"$record" || true
 		case $name in
