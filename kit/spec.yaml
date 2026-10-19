@@ -146,18 +146,3 @@ setup:
         - /home/agent/.local/bin/junie-init.sh
       user: agent
       description: Init the home dir so the agent can see the host junie install
-    # Diagnostic, and to be removed once the stray escape sequences in the
-    # prompt are understood: `junie.logging.debug.enabled` is a system property,
-    # which nothing in the environment can set, and the entrypoint resolves
-    # `junie` through ~/.local/bin. The symlink is removed first because `cp`
-    # onto it would write through to the read-only host mount and fail. The
-    # property raises the root logger, so one session writes a large log.
-    - command:
-        - sh
-        - -c
-        - >-
-          rm -f /home/agent/.local/bin/junie
-          && cp /home/agent/.local/bin/junie-tui-debug.sh /home/agent/.local/bin/junie
-          && chmod +x /home/agent/.local/bin/junie
-      user: agent
-      description: Install the TUI debug-logging wrapper over the junie symlink

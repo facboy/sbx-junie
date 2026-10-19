@@ -226,11 +226,6 @@ is on, independent of anything this kit's egress policy allows.
 `en_US.UTF-8` resolves back to ASCII in here, and the JVM reads the console charset from the locale
 rather than from `file.encoding`. Unset, every non-ASCII character the TUI writes comes out as `?`.
 
-The spec's last startup hook is a diagnostic, not part of the environment: it replaces
-`~/.local/bin/junie` with a wrapper that turns on the keyboard handler's debug log, which names every
-CSI sequence the input parser reads and so records the escape sequences that reach the prompt as
-text. Delete that hook and `files/home/.local/bin/junie-tui-debug.sh` when it has answered.
-
 ## Cleanup
 
 Inside the sandbox, `junie-ide-relay.sh` leaves the endpoints and the instance files it wrote there
