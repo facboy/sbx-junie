@@ -33,15 +33,17 @@ PROJ_DIR="${SBX_STATE_DIR}/${PROJ}"
 JUNIE_HOME="${PROJ_DIR}/_junie"
 OV_ROOT="${PROJ_DIR}/overlays"
 
-# Per-project switches: which of the host's tool trees this project's sandbox
-# gets. They come from `.junie/sbx.toml` in the project directory, as `uv` and
-# `pnpm` booleans, and default to on, so a project with no file behaves as it did
-# before the switches existed. `JUNIE_SBX_UV` and `JUNIE_SBX_PNPM` override the
-# file for a single run. Node and the Playwright browsers follow pnpm: the tree
-# pnpm runs on and the browsers it drives go with it.
-SWITCH_FILE="${PWD}/.junie/sbx.toml"
+# Per-project settings: which of the host's tool trees this project's sandbox
+# gets, and the host paths it mounts beyond them. They come from
+# `.junie/sbx.toml` in the project directory, as `uv` and `pnpm` booleans and a
+# `mounts` list of host paths; the booleans default to on and the list to empty.
+# `JUNIE_SBX_UV` and `JUNIE_SBX_PNPM` override the booleans for a single run.
+# Node and the Playwright browsers follow pnpm: the tree pnpm runs on and the
+# browsers it drives go with it.
+CONFIG_FILE="${PWD}/.junie/sbx.toml"
 UV_ON=1
 PNPM_ON=1
+CUSTOM_MOUNTS=()
 
 switch_value() {
 	case "$1" in
@@ -55,11 +57,12 @@ switch_value() {
 }
 
 # tomllib is the stdlib reader the relay daemon also uses, so a file that will
-# not parse stops the run rather than leaving a switch looking set when it never
-# loaded.
-read_switch_file() {
-	python3 - "${SWITCH_FILE}" <<-'PY'
-		import sys, tomllib
+# not parse stops the run rather than leaving a setting looking set when it never
+# loaded. A mount is a host path, read-only with `:ro`, and `~/` is expanded
+# here since TOML has no shell to do it.
+read_config_file() {
+	python3 - "${CONFIG_FILE}" <<-'PY'
+		import os, sys, tomllib
 
 		try:
 		    with open(sys.argv[1], "rb") as handle:
@@ -76,17 +79,33 @@ read_switch_file() {
 		                         % (name, value))
 		        raise SystemExit(1)
 		    print("%s=%d" % (name, value))
+
+		mounts = document.get("mounts", [])
+		if not isinstance(mounts, list) or not all(isinstance(entry, str)
+		                                           for entry in mounts):
+		    sys.stderr.write("junie-sbx: %s: mounts wants a list of host paths\n"
+		                     % sys.argv[1])
+		    raise SystemExit(1)
+		for entry in mounts:
+		    path, ro = (entry[:-3], ":ro") if entry.endswith(":ro") else (entry, "")
+		    path = os.path.abspath(os.path.expanduser(path)) if path else ""
+		    if "\n" in entry or not path or not os.path.exists(path):
+		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is no host path\n"
+		                         % (sys.argv[1], entry))
+		        raise SystemExit(1)
+		    print("mount=%s%s" % (path, ro))
 	PY
 }
 
-if [[ -f "${SWITCH_FILE}" ]]; then
-	switches="$(read_switch_file)"
+if [[ -f "${CONFIG_FILE}" ]]; then
+	settings="$(read_config_file)"
 	while IFS='=' read -r name value; do
 		case "${name}" in
-			uv) UV_ON="$(switch_value "${value}" "${SWITCH_FILE}")" ;;
-			pnpm) PNPM_ON="$(switch_value "${value}" "${SWITCH_FILE}")" ;;
+			uv) UV_ON="$(switch_value "${value}" "${CONFIG_FILE}")" ;;
+			pnpm) PNPM_ON="$(switch_value "${value}" "${CONFIG_FILE}")" ;;
+			mount) CUSTOM_MOUNTS+=("${value}") ;;
 		esac
-	done <<< "${switches}"
+	done <<< "${settings}"
 fi
 
 if [[ -n "${JUNIE_SBX_UV:-}" ]]; then
@@ -236,6 +255,11 @@ if [[ "${PNPM_ON}" == 1 ]]; then
 	add_mount "${PNPM_CACHE_MERGED}" ""
 	add_mount "${PNPM_MERGED}" ""
 	add_mount "${PW_CACHE_MERGED}" ""
+fi
+
+# The project's own mounts from `.junie/sbx.toml` follow the built-in ones.
+if [[ ${#CUSTOM_MOUNTS[@]} -gt 0 ]]; then
+	MOUNTS+=("${CUSTOM_MOUNTS[@]}")
 fi
 
 # Only the variables a mounted tree needs reach the sandbox: with a switch off

@@ -1,0 +1,17 @@
+# Example of a project's `.junie/sbx.toml`, which `junie-sbx.sh` reads from the
+# directory it runs in. Every key is optional: without the file the sandbox gets
+# both tool trees and no extra mounts. Copy this to `<project>/.junie/sbx.toml`.
+
+# Which of the host's tool trees the sandbox gets, at their host paths. `pnpm`
+# also governs node and the Playwright browsers, which that tool chain needs.
+uv = true
+pnpm = true
+
+# Extra host paths, appended to the mounts the script passes. Each appears in the
+# sandbox at its own path, `~/` is expanded, and a trailing `:ro` makes it
+# read-only. A path the host does not have stops the run, so the entries below
+# are commented out: uncomment the ones your host has.
+mounts = [
+    # "~/data",
+    # "/srv/datasets:ro",
+]

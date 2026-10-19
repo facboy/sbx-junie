@@ -58,6 +58,9 @@ The host paths it passes:
   and the pnpm store ([Your uv and pnpm environments](#your-uv-and-pnpm-environments)), each of
   which a project can leave out with a switch.
 
+A project adds more of its own through `.junie/sbx.toml`
+([Mounting more of the host](#mounting-more-of-the-host)).
+
 Auth goes through the sandbox proxy; the credentials the kit declares, and why the allowlist names
 no install host, are in [`kit/README.md`](kit/README.md#how-auth-works).
 
@@ -137,6 +140,23 @@ alone.
 `JUNIE_SBX_UV=0` and `JUNIE_SBX_PNPM=0` override the file for one run, taking precedence over it.
 A value that is neither `true` nor `false` stops the run and names it: a typo would otherwise read
 as on, which is the default.
+
+## Mounting more of the host
+
+The same file adds host paths to the mounts the script passes:
+
+```toml
+mounts = ["~/data", "/srv/datasets:ro"]
+```
+
+They are appended to the ones above, at their host paths, and a trailing `:ro` makes one read-only
+as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a relative
+entry resolves against the project directory. A `mounts` value that is not a list of strings, or an
+entry naming a path the host does not have, stops the run and names it: `sbx` rejects a mount it
+cannot find, and reaching that refusal costs the rest of the startup.
+
+[`sbx.example.toml`](sbx.example.toml) holds every setting, commented, as a starting point: copy it
+to `<project>/.junie/sbx.toml`.
 
 ## Connecting to an IDE on the host
 
