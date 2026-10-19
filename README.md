@@ -30,7 +30,9 @@ Run once, from this directory:
 
 It exposes `~/.junie` as a read-only bindfs view under
 `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/junie_ro/_junie`, so the sandbox can take the host's Junie
-home as a workspace without write access. Re-running it is a no-op.
+home as a workspace without write access. Re-running it is a no-op. A host without `bindfs` stops
+here with a message naming it, before anything is created; `junie-sbx.sh` refuses an empty view, so
+an unfinished setup is reported rather than mounted.
 
 ## Building the image
 

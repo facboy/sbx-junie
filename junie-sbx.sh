@@ -194,6 +194,15 @@ merge_overlay() {
 	fi
 }
 
+# The Junie home links AGENTS.md, docs and tools out of the read-only view
+# `setup-junie-sbx.sh` mounts, and copies its session index. An empty view mounts
+# without complaint and leaves the sandbox with none of them, so an unfinished
+# setup is reported here rather than mounted.
+if [[ -z "$(ls -A "${DOT_JUNIE_RO}" 2> /dev/null)" ]]; then
+	echo "junie-sbx: ${DOT_JUNIE_RO} is empty or missing; run setup-junie-sbx.sh" >&2
+	exit 1
+fi
+
 if [[ ! -d "${JUNIE_HOME}" ]]; then
 	read -p "JUNIE_HOME ${JUNIE_HOME} does not exist, create? (y/N): " -n 1 -r
 	echo # Moves to a new line

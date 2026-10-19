@@ -118,18 +118,30 @@ case and returns 0 for `exit 3`.
 
 ## Medium severity
 
-### 4. `setup-junie-sbx.sh` never checks for bindfs itself
+### 4. `setup-junie-sbx.sh` never checks for bindfs itself — fixed
 
 The mount test is `mount -t fuse.bindfs | fgrep -q …`, which is the right guard: bindfs
 registers as `fuse.bindfs`, and `mount -t` filters on that type, so a view already up is
 skipped. What is missing is the other half — nothing checks that `bindfs` exists before
-calling it. On a host without it the script dies with `bindfs: command not found` and exit
+calling it. On a host without it the script died with `bindfs: command not found` and exit
 127, right after creating the empty mountpoint, which is the opposite of the treatment
 `fuse-overlayfs` gets three lines later (a named prerequisite and a warning). Reproduced
 here, where bindfs is not installed.
 
-It also leaves `${JUNIE_RO}/_junie` created and empty, so the next `junie-sbx.sh` run
-mounts an empty directory as the read-only Junie home without complaint.
+It also left `${JUNIE_RO}/_junie` created and empty, so the next `junie-sbx.sh` run
+mounted an empty directory as the read-only Junie home without complaint.
+
+The prerequisite is now checked before the mountpoint is made, so an absent `bindfs`
+stops the script with a message naming it and creating nothing. A `bindfs` that runs
+and fails takes the mountpoint back with `rmdir`, so the next run starts from the tree it
+left rather than from an already-created directory. `junie-sbx.sh` refuses an empty view
+outright, so an unfinished setup is reported instead of being mounted.
+
+Verified with a stubbed `bindfs` and `mount`, since this host has neither: a present
+`bindfs` is called once and exits 0, a failing one exits 1 with no `_junie` left, an
+absent one exits 1 before `junie_ro` is created at all, an already-mounted view skips the
+call entirely, and the previous revision still dies at exit 127 with the empty directory
+left behind.
 
 ### 5. `junie-sbx.sh` does not survive a fresh state directory
 
@@ -221,8 +233,8 @@ into the log.
 
 1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`.
 2. ~~The exit status and stdin EOF in `junie-tty-filter.py`~~ — done.
-3. Idempotent, non-interactive home init in `junie-sbx.sh`; the missing bindfs presence
-   check in `setup-junie-sbx.sh`.
+3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. The idempotent,
+   non-interactive home init in `junie-sbx.sh` remains.
 4. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
    preamble read timeout.
 5. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version

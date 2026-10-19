@@ -5,9 +5,24 @@ set -eu
 CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}/junie-sbx"
 JUNIE_RO="${CONFIG_HOME}/junie_ro"
 
-mkdir -p "${JUNIE_RO}/_junie"
+# `mount -t` filters on the type bindfs registers as, so a view already up is
+# left alone. Otherwise bindfs has to be here: the sandbox mounts the view and
+# takes AGENTS.md, docs and tools from it, so a host without it gets no working
+# Junie home. Checked before the mountpoint is made, and a mount that fails
+# takes that mountpoint back, so a failed run leaves nothing for the next one to
+# mount as an empty read-only home.
 if ! mount -t fuse.bindfs | fgrep -q "${JUNIE_RO}/_junie"; then
-  bindfs -r --no-allow-other --resolve-symlinks ~/.junie "${JUNIE_RO}/_junie"
+  if ! command -v bindfs > /dev/null 2>&1; then
+    echo "junie-sbx: bindfs is not installed, so ~/.junie cannot be exposed to" >&2
+    echo "  the sandbox read-only. Install it and re-run." >&2
+    exit 1
+  fi
+  mkdir -p "${JUNIE_RO}/_junie"
+  if ! bindfs -r --no-allow-other --resolve-symlinks ~/.junie "${JUNIE_RO}/_junie"; then
+    rmdir "${JUNIE_RO}/_junie" 2> /dev/null || true
+    echo "junie-sbx: bindfs could not mount ~/.junie at ${JUNIE_RO}/_junie" >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "${JUNIE_RO}/_local/bin"
