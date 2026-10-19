@@ -310,6 +310,18 @@ systemctl --user restart junie-ide-relayd
 
 The sandbox's watcher picks the work up within a tick, without restarting the sandbox.
 
+## Tests
+
+The daemon's parsers and allowlist and the terminal filter's splitting are covered by
+`tests/`, which needs nothing beyond `python3`:
+
+```console
+python3 -m unittest discover -s tests
+```
+
+The MCP cases drive `splice_mcp` over socket pairs with a fake IDE, so a withheld call is
+shown never to reach it.
+
 ## Customization
 
 Junie's instructions come from the host's Junie home, which is mounted read-only: edit

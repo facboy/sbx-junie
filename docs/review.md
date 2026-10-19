@@ -243,38 +243,44 @@ into the log.
 
 ## Low severity
 
-- `junie-ide-relay.sh` writes the watcher pidfile and never removes it, so a `SIGTERM`
-  leaves a stale pid and the "one watcher per sandbox" check leans on pid reuse — the exact
-  class of bug the record-reuse code elsewhere in the same file handles carefully.
-- `--secret` on the endpoint defaults to `$JUNIE_IDE_RELAY_SECRET` and nothing else, since
-  the launcher never passes the flag. It is dead weight as it stands.
-- `docs/fragmented-input-sequence.md` says pieces up to 60 ms apart are rejoined;
-  `HOLD_TIMEOUT` is 0.05 s.
-- `kit/Dockerfile` pins Playwright 1.63.0, while `kit/README.md` gives advice anchored to
-  1.61. Not contradictory, but the two are drifting.
-- A `mounts` entry that is only `:ro` reduces to an empty path and is reported as "no host
-  path", which is true but not the setting that was wrong. The same unconditional strip
-  makes a real directory whose name ends in `:ro` unmountable, since the suffix is removed
-  whether or not the shortened path exists. Checking the full entry first and only
-  stripping when that path is absent would cover both.
-- `junie-init.sh` appends to `~/.npmrc` only when the key is absent, so a stale
-  `store-dir` from an earlier sandbox is never corrected.
-- `kit/README.md` and `kit/spec.yaml` both give the `1003h` → `1002h` rewrite without the
-  `1003l` half, which the module docstring does explain.
+1. `junie-ide-relay.sh` writes the watcher pidfile and never removes it, so a `SIGTERM`
+   leaves a stale pid and the "one watcher per sandbox" check leans on pid reuse — the
+   exact class of bug the record-reuse code elsewhere in the same file handles carefully.
+2. `--secret` on the endpoint defaults to `$JUNIE_IDE_RELAY_SECRET` and nothing else, since
+   the launcher never passes the flag. It is dead weight as it stands.
+3. `docs/fragmented-input-sequence.md` says pieces up to 60 ms apart are rejoined;
+   `HOLD_TIMEOUT` is 0.05 s.
+4. `kit/Dockerfile` pins Playwright 1.63.0, while `kit/README.md` gives advice anchored to
+   1.61. Not contradictory, but the two are drifting.
+5. A `mounts` entry that is only `:ro` reduces to an empty path and is reported as "no host
+   path", which is true but not the setting that was wrong. The same unconditional strip
+   makes a real directory whose name ends in `:ro` unmountable, since the suffix is removed
+   whether or not the shortened path exists. Checking the full entry first and only
+   stripping when that path is absent would cover both.
+6. `junie-init.sh` appends to `~/.npmrc` only when the key is absent, so a stale
+   `store-dir` from an earlier sandbox is never corrected.
+7. `kit/README.md` and `kit/spec.yaml` both give the `1003h` → `1002h` rewrite without the
+   `1003l` half, which the module docstring does explain.
 
 ## Nits
 
-- `bin/junie-ide-relayd` is 0644 under a `python3` shebang. Nothing invokes it directly
-  today — the unit spells out `python3 path` — so the failure is latent.
-- `junie-sbx.sh` pins the provider to `ollama`, which leaves the kit's six credential
-  declarations unreachable from the shipped entry point.
-- `sbx.example.toml` indents `mounts` by four spaces where the rest of the repo uses two.
-- The sample unit has no `RestartPreventExitStatus`, so a deliberately refused start
-  retries every two seconds and repeats the same `chmod` advice.
-- No tests. `bin/junie-ide-relayd` is roughly 1170 lines of parsers with a security
-  boundary riding on them, and `split_digest_secret`, `read_chunked`,
-  `filtered_response`, `refused_tool` and `scrub_payload` are pure functions that need no
-  fixtures. Tests there would have caught every item in the first section.
+1. `bin/junie-ide-relayd` is 0644 under a `python3` shebang. Nothing invokes it directly
+   today — the unit spells out `python3 path` — so the failure is latent.
+2. `junie-sbx.sh` pins the provider to `ollama`, which leaves the kit's six credential
+   declarations unreachable from the shipped entry point.
+3. `sbx.example.toml` indents `mounts` by four spaces where the rest of the repo uses two.
+4. The sample unit has no `RestartPreventExitStatus`, so a deliberately refused start
+   retries every two seconds and repeats the same `chmod` advice.
+5. There were no tests, in a daemon of roughly 1500 lines of parsers with a security
+   boundary riding on them. `tests/test_relayd.py` now covers `split_digest_secret`,
+   `read_chunked`, `read_message`, `tool_calls`, `allowed_tool`, `refused_tool`,
+   `scrub_payload`, `filtered_response`, `decode_chunked` and `rebuild_head`, plus a
+   socket-pair table over `splice_mcp`: single, batched, notification, chunked,
+   unparseable and dispatcher-targeted calls, the stream's terminator and the reply
+   after it, and a refusal while the stream is open. `tests/test_tty_filter.py` covers
+   `split_sequences`, `character_length` and `partial_motion_sequence`.
+   `python3 -m unittest discover -s tests` runs both, and ten of the cases fail against
+   the revision that had the allowlist holes.
 
 ## Priority
 
@@ -286,5 +292,5 @@ into the log.
 5. ~~The relay's invisible-tab `grep`~~ — done; the separator is a variable.
 6. ~~Per-connection error handling in the daemon~~ — done; the non-ASCII secret, the bind
    failure, the preamble timeout and a per-connection guard.
-7. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
-   and doc drift.
+7. ~~Unit tests for the relay's parsers and the filter's `split_sequences`~~ — done,
+   in `tests/`. Then the version and doc drift.
