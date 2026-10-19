@@ -175,10 +175,11 @@ directory added after setup is linked by the next run; a real directory of the s
 keeps its contents; a broken link to a host session is replaced; and an index the CLI wrote
 is left alone. The previous revision needs a `y` on stdin and, given one, still aborts.
 
-### 6. `USER_CONFIG_HOME` is exported and never read
+### 6. `USER_CONFIG_HOME` is exported and never read — fixed
 
-`junie-sbx.sh` passes it; nothing in the kit uses it. Either use it or drop it from
-`ENVS`.
+`junie-sbx.sh` passed it; nothing in the kit used it. Removed from `ENVS`. The value was
+`${CONFIG_HOME}` — the `junie-sbx` directory itself rather than the XDG root the name
+promises — so leaving it in place would have misled the first script that did read it.
 
 ### 7. The relay's `grep "^$digest\t"` is right only by accident
 
@@ -253,7 +254,8 @@ into the log.
 2. ~~The exit status and stdin EOF in `junie-tty-filter.py`~~ — done.
 3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. ~~The
    idempotent, non-interactive home init in `junie-sbx.sh`~~ — done.
-4. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
+4. ~~`USER_CONFIG_HOME`~~ — done; dropped from `ENVS`.
+5. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
    preamble read timeout.
-5. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
+6. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
    and doc drift.
