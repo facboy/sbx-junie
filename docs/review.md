@@ -201,21 +201,38 @@ the same loops kill a live endpoint, which is the failure this avoids. A project
 containing spaces still reads back as one field, and an `rstrip` pass leaves the file
 unchanged.
 
-### 8. Unguarded failure paths in `bin/junie-ide-relayd`
+### 8. Unguarded failure paths in `bin/junie-ide-relayd` — fixed
 
-Each of these kills a connection thread that serves every sandbox:
+Each of these killed a connection thread that serves every sandbox:
 
 - `refused_tool` assumed `params` and `arguments` were dicts. `{"params": []}` or
   `{"arguments": "ls"}` raised `AttributeError` inside the request thread, which left the
   client socket open. Reproduced, and fixed with item 1: both are type-checked now, and a
   call shaped otherwise than the schema says is refused.
-- `authorized` decodes the presented secret with `errors="replace"` but compares against
-  the stored one, so a record whose secret is non-ASCII parses in `read_secrets` and then
-  makes `hmac.compare_digest` raise `TypeError`. Reproduced.
-- `main` binds the listener without catching `OSError`, so a port already in use is a raw
+- `authorized` decoded the presented secret with `errors="replace"` but compared against
+  the stored one, so a record whose secret is non-ASCII parsed in `read_secrets` and then
+  made `hmac.compare_digest` raise `TypeError`. Reproduced.
+- `main` bound the listener without catching `OSError`, so a port already in use was a raw
   traceback rather than a message.
-- `read_preamble` reads up to 256 bytes one at a time with no per-byte timeout, so after
-  `accept` any local process can hold a thread by stalling mid-preamble.
+- `read_preamble` read up to 256 bytes one at a time with no timeout, so after `accept` any
+  local process could hold a thread by stalling mid-preamble.
+
+The comparison is now between bytes: `read_secrets` skips a secret that is not ASCII,
+naming the record once, and `authorized` encodes the stored secret before comparing. The
+binding reports the address and the reason and returns 1. `read_preamble` gives the whole
+line `PREAMBLE_TIMEOUT` -- one deadline, not one per byte, so a caller that dribbles a byte
+at a time is bounded too -- and clears the socket timeout afterwards, since what follows
+may be a session meant to sit idle. The accept loop also starts `serve`, which reports an
+unexpected failure, closes the socket, and leaves the other threads running.
+
+Verified by loading the daemon as a module: a non-ASCII record is skipped with a message
+while the good record beside it still authorises and a wrong secret is still refused; a
+connection against the bad record now gets EOF instead of a thread that dies and a client
+left waiting; a busy port returns 1 with `cannot listen on 127.0.0.1:<port>`; a stalled
+client and one that dribbles a byte every 200 ms each release their thread at the 10 s
+budget; and a forced exception inside `handle` is logged as `connection failed` with the
+socket closed. A live daemon still answers `health` with its protocol version and rejects a
+secretless preamble.
 
 ### 9. `splice` re-raises a write error
 
@@ -267,7 +284,7 @@ into the log.
    idempotent, non-interactive home init in `junie-sbx.sh`~~ — done.
 4. ~~`USER_CONFIG_HOME`~~ — done; dropped from `ENVS`.
 5. ~~The relay's invisible-tab `grep`~~ — done; the separator is a variable.
-6. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
-   preamble read timeout.
+6. ~~Per-connection error handling in the daemon~~ — done; the non-ASCII secret, the bind
+   failure, the preamble timeout and a per-connection guard.
 7. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version
    and doc drift.

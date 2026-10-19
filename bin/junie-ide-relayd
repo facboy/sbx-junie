@@ -82,6 +82,14 @@ itself; the secret is what keeps one sandbox out of another project's IDE. Both
 the instance files and the secret records are re-read on every connection, so an
 IDE that restarts on a new port, or a project provisioned after this daemon
 started, needs no restart.
+
+Nothing a single connection does takes the daemon down. A preamble must arrive
+within `PREAMBLE_TIMEOUT`, so a local process that connects and stalls cannot
+hold a thread; a failure inside a connection is reported and closes that socket;
+a port already in use is a message rather than a traceback; and a record whose
+secret cannot be compared -- it is not ASCII, so `hmac.compare_digest` would raise
+-- is skipped and named, since one malformed record must not stop the daemon
+serving every other project.
 """
 import argparse
 import hashlib
@@ -164,6 +172,11 @@ REFUSED_REPLY = ('{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,'
 PARSE_ERROR_REPLY = (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
                      b'"message":"Request body could not be read"}}')
 MAX_PREAMBLE = 256
+# How long a whole preamble may take to arrive. A client that connects and stalls
+# would otherwise hold the thread that serves it, and the accept loop starts one
+# per connection, so a local process could accumulate them. Long enough for a
+# client on a loaded host to get its line out in one go.
+PREAMBLE_TIMEOUT = 10
 # How long a session with no stream open may go without traffic before it is
 # closed. A session's stream is quiet for long stretches while the agent thinks,
 # which is why an open one suspends this rather than counting against it.
@@ -300,21 +313,35 @@ def read_preamble(conn):
 
     Read a byte at a time: the preamble ends at a newline but the bytes after it
     are protocol payload, so a buffered reader would swallow the client's first
-    request.
+    request. One deadline bounds the whole line rather than each byte, so a
+    caller that dribbles bytes cannot hold this thread for `MAX_PREAMBLE` times
+    the budget. The socket's own timeout is cleared before returning, since what
+    follows may be a session that is meant to sit idle.
     """
     line = b""
-    while len(line) < MAX_PREAMBLE:
+    deadline = time.monotonic() + PREAMBLE_TIMEOUT
+    try:
+        while len(line) < MAX_PREAMBLE:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            conn.settimeout(remaining)
+            try:
+                chunk = conn.recv(1)
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            if chunk == b"\n":
+                break
+            line += chunk
+        else:
+            return None
+    finally:
         try:
-            chunk = conn.recv(1)
+            conn.settimeout(None)
         except OSError:
-            return None
-        if not chunk:
-            return None
-        if chunk == b"\n":
-            break
-        line += chunk
-    else:
-        return None
+            pass
     if not line.startswith(PREAMBLE_PREFIX):
         return None
     return line[len(PREAMBLE_PREFIX):]
@@ -430,6 +457,15 @@ def report_exposed_once(path, fix):
                      "secret is not trusted; %s\n" % (path, fix))
 
 
+def report_skipped_once(path, why):
+    """Name a record skipped for a reason other than exposure, once."""
+    with REPORTED_LOCK:
+        if path in REPORTED:
+            return
+        REPORTED.add(path)
+    sys.stderr.write("junie-ide-relayd: ignoring %s: %s\n" % (path, why))
+
+
 def read_secrets(secrets_dir):
     """The provisioned records, as a list of (project path, secret).
 
@@ -442,6 +478,11 @@ def read_secrets(secrets_dir):
     A secret another local user can read is not a credential, so a record that
     is exposed is skipped however well it parses: it would authorise the reader
     to reach the project it names.
+
+    A secret that is not ASCII is skipped for the same kind of reason as an
+    unreadable file: `hmac.compare_digest` raises `TypeError` on non-ASCII text,
+    and a record nobody meant to write must not take down the thread that would
+    otherwise serve every other project.
     """
     if exposed(secrets_dir):
         report_exposed_once(secrets_dir, exposed_fix(secrets_dir))
@@ -465,6 +506,11 @@ def read_secrets(secrets_dir):
         except Exception:
             continue
         if isinstance(project, str) and isinstance(secret, str) and secret:
+            try:
+                secret.encode("ascii")
+            except UnicodeEncodeError:
+                report_skipped_once(path, "its secret is not ASCII")
+                continue
             records.append((project, secret))
     return records
 
@@ -481,9 +527,8 @@ def authorized(secrets_dir, instances_dir, digest, secret):
     Compared with `hmac.compare_digest`, so that a wrong secret cannot be
     recovered from how long this takes.
     """
-    presented = secret.decode("ascii", "replace")
     roots = [project for project, known in read_secrets(secrets_dir)
-             if hmac.compare_digest(known, presented)]
+             if hmac.compare_digest(known.encode("ascii"), secret)]
     if not roots:
         return False
     project = project_for_digest(instances_dir, digest)
@@ -1388,6 +1433,26 @@ def handle(conn, instances_dir, secrets_dir, allow_state):
         relay_rpc(conn, instances_dir, digest)
 
 
+def serve(conn, instances_dir, secrets_dir, allow_state):
+    """`handle` for one connection, with the socket closed whatever happens.
+
+    A connection that fails in a way nobody anticipated must not leave its
+    client waiting on a socket that nothing will answer, and must not lose the
+    traceback either: this thread serves one sandbox, and the daemon goes on
+    accepting the rest.
+    """
+    try:
+        handle(conn, instances_dir, secrets_dir, allow_state)
+    except Exception as err:
+        sys.stderr.write("junie-ide-relayd: connection failed: %s: %s\n"
+                         % (type(err).__name__, err))
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
@@ -1445,8 +1510,17 @@ def main(argv):
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", args.port))
-    listener.listen(64)
+    try:
+        listener.bind(("127.0.0.1", args.port))
+        listener.listen(64)
+    except OSError as err:
+        # Reported rather than raised: a port already in use is an ordinary
+        # mistake, and a traceback tells the operator less than the address does.
+        listener.close()
+        sys.stderr.write("junie-ide-relayd: cannot listen on 127.0.0.1:%d: %s\n"
+                         "  another process holds the port; stop it, or pass "
+                         "--port\n" % (args.port, err.strerror or err))
+        return 1
     sys.stderr.write("junie-ide-relayd: listening on 127.0.0.1:%d, instances %s\n"
                      % (args.port, instances_dir))
     report_allow(allow_state.patterns, allow_state.source)
@@ -1457,7 +1531,7 @@ def main(argv):
             conn, _ = listener.accept()
         except OSError:
             continue
-        threading.Thread(target=handle,
+        threading.Thread(target=serve,
                          args=(conn, instances_dir, secrets_dir, allow_state),
                          daemon=True).start()
 
