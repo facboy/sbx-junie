@@ -143,19 +143,37 @@ absent one exits 1 before `junie_ro` is created at all, an already-mounted view 
 call entirely, and the previous revision still dies at exit 127 with the empty directory
 left behind.
 
-### 5. `junie-sbx.sh` does not survive a fresh state directory
+### 5. `junie-sbx.sh` does not survive a fresh state directory — fixed
 
-`init_junie_home` links into `$JUNIE_HOME` and copies
+`init_junie_home` linked into `$JUNIE_HOME` and copied
 `${DOT_JUNIE_RO}/sessions/index.jsonl` unconditionally. This host's `~/.junie` has no
-`sessions/` directory; the copy then fails and `set -e` aborts with the three links already
-made and `sessions/` already created, so the next run finds the directory present, skips
-`init_junie_home` entirely, and leaves a Junie home with an empty `sessions/` and no index.
-Reproduced against a fixture. The README's "re-running is a no-op" does not cover this.
-Because the init runs only when the directory is absent, a session directory created after
-setup is never linked either.
+`sessions/` directory; the copy then failed and `set -e` aborted with the three links
+already made and `sessions/` already created, so the next run found the directory present,
+skipped `init_junie_home` entirely, and left a Junie home with an empty `sessions/` and no
+index. Reproduced against a fixture. The README's "re-running is a no-op" did not cover
+this. Because the init ran only when the directory was absent, a session directory created
+after setup was never linked either.
 
-The `read -p … (y/N)` prompt is a hard stop for anything unattended, with no flag or
+The `read -p … (y/N)` prompt was a hard stop for anything unattended, with no flag or
 `JUNIE_SBX_YES` to opt in. The rest of the repo is written for scripted use.
+
+The init now runs on every start and answers nothing: `ln -sfn` per name replaces the links
+whether or not an earlier run made them, so there is no prompt and no half-made home to
+strand. The index is copied only into a home that has none, since the CLI writes that file
+as it runs and re-copying it on a later start would drop the sessions the sandbox had
+recorded. The host's session directories are linked with `ln -sfn` under `sessions/` rather than
+`sessions/` being a one-time copy, and that runs on every start, so a session the host
+records after setup is reachable too. A name the home already holds as a real directory is
+the sandbox's own session and is skipped; a link, including a broken one, is replaced. An
+absent `sessions/` on the host copies and links nothing and fails nothing.
+
+Verified against fixtures: a fresh state directory on this host — whose `~/.junie` has no
+`sessions/` — now starts the sandbox and leaves a home with all three links and an empty
+`sessions/`, where the previous revision aborted at the copy after prompting; a rerun writes
+nothing to stderr; a host index and two session directories are copied and linked; a session
+directory added after setup is linked by the next run; a real directory of the same name
+keeps its contents; a broken link to a host session is replaced; and an index the CLI wrote
+is left alone. The previous revision needs a `y` on stdin and, given one, still aborts.
 
 ### 6. `USER_CONFIG_HOME` is exported and never read
 
@@ -233,8 +251,8 @@ into the log.
 
 1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`.
 2. ~~The exit status and stdin EOF in `junie-tty-filter.py`~~ — done.
-3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. The idempotent,
-   non-interactive home init in `junie-sbx.sh` remains.
+3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. ~~The
+   idempotent, non-interactive home init in `junie-sbx.sh`~~ — done.
 4. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
    preamble read timeout.
 5. Unit tests for the relay's parsers and the filter's `split_sequences`; then the version

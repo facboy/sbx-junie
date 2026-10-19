@@ -152,19 +152,36 @@ provision_relay_secret() {
 RELAY_SECRET="$(provision_relay_secret)"
 
 init_junie_home() {
-	mkdir -p "${JUNIE_HOME}"
+	mkdir -p "${JUNIE_HOME}/sessions"
 
-	# create symlinks
-	/usr/bin/ln -s "${DOT_JUNIE_RO}/AGENTS.md" "${JUNIE_HOME}"
-	/usr/bin/ln -s "${DOT_JUNIE_RO}/docs" "${JUNIE_HOME}"
-	/usr/bin/ln -s "${DOT_JUNIE_RO}/tools" "${JUNIE_HOME}"
+	# `-sfn` per name, so a rerun replaces the links rather than failing on
+	# the ones an earlier run made.
+	local name
+	for name in AGENTS.md docs tools; do
+		/usr/bin/ln -sfn "${DOT_JUNIE_RO}/${name}" "${JUNIE_HOME}/${name}"
+	done
 
-	# for now, copy sessions over
-	mkdir "${JUNIE_HOME}/sessions"
-	cp "${DOT_JUNIE_RO}/sessions/index.jsonl" "${JUNIE_HOME}/sessions/"
-	pushd "${JUNIE_HOME}/sessions/" > /dev/null
-	find "${DOT_JUNIE_RO}/sessions" -name 'session-*' -exec ln -s {} \;
-	popd
+	# Seeded only into a home that has no index yet: the CLI writes that file as
+	# it runs, so copying over it on a later run would drop the sessions the
+	# sandbox had recorded.
+	if [[ ! -e "${JUNIE_HOME}/sessions/index.jsonl" &&
+		-f "${DOT_JUNIE_RO}/sessions/index.jsonl" ]]; then
+		cp "${DOT_JUNIE_RO}/sessions/index.jsonl" "${JUNIE_HOME}/sessions/"
+	fi
+
+	# The host's session directories, linked on every run so one recorded after
+	# setup is reachable too. A name the home holds as a real directory is the
+	# sandbox's own session, and is left alone; `-n` keeps the link in
+	# `sessions/` when the name is already a symlink to a directory.
+	local session
+	for session in "${DOT_JUNIE_RO}"/sessions/session-*; do
+		[[ -e "${session}" ]] || continue
+		if [[ -e "${JUNIE_HOME}/sessions/${session##*/}" &&
+			! -L "${JUNIE_HOME}/sessions/${session##*/}" ]]; then
+			continue
+		fi
+		/usr/bin/ln -sfn "${session}" "${JUNIE_HOME}/sessions/"
+	done
 }
 
 # Overlays lower onto a per-project upper layer, leaving the merged path in
@@ -203,16 +220,12 @@ if [[ -z "$(ls -A "${DOT_JUNIE_RO}" 2> /dev/null)" ]]; then
 	exit 1
 fi
 
-if [[ ! -d "${JUNIE_HOME}" ]]; then
-	read -p "JUNIE_HOME ${JUNIE_HOME} does not exist, create? (y/N): " -n 1 -r
-	echo # Moves to a new line
-	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    		echo "Exiting."
-    		exit 1
-	fi
-	
-	init_junie_home
-fi
+# The home is per-project state this script owns, so it is set up on every run
+# rather than once behind a prompt: the links and the session views are rebuilt
+# idempotently, which also picks up a host session recorded after setup. Nothing
+# here aborts, so a home the host's `~/.junie` cannot fill (it has no `sessions/`
+# until the CLI has run there) still leaves a usable home behind.
+init_junie_home
 
 # Only a tree its switch left on is overlaid and mounted; an off tree is absent
 # from the sandbox entirely, so its cache and store stay the host's alone.

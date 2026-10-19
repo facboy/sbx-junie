@@ -34,6 +34,10 @@ home as a workspace without write access. Re-running it is a no-op. A host witho
 here with a message naming it, before anything is created; `junie-sbx.sh` refuses an empty view, so
 an unfinished setup is reported rather than mounted.
 
+`junie-sbx.sh` sets up each project's Junie home at the start of every run — the three read-only
+links and the host's sessions — without prompting, so it works unattended and a host session
+recorded after the first run is picked up by the next.
+
 ## Building the image
 
 ```console
