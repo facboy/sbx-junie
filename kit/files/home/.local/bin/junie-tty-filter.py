@@ -143,6 +143,14 @@ def main(argv):
     master, slave = pty.openpty()
     set_winsize(master, rows, cols)
     set_winsize(slave, rows, cols)
+    # openpty() copies this process's line settings, which are cooked: until the
+    # JVM sets the pty raw itself, a couple of seconds later, anything typed is
+    # echoed straight back and re-read as terminal output. Only the input flags
+    # go, so the child's newlines are still translated until it takes over.
+    slave_modes = termios.tcgetattr(slave)
+    slave_modes[0] &= ~(termios.ICRNL | termios.IXON)
+    slave_modes[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG | termios.IEXTEN)
+    termios.tcsetattr(slave, termios.TCSANOW, slave_modes)
 
     # The child puts this pty into the modes it wants; this only has to hand it
     # every byte the terminal sent, unchanged.
