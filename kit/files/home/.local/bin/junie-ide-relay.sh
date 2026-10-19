@@ -106,7 +106,20 @@ host_dir=$(find_host_dir) || exit 0
 mkdir -p "$instances_dir" "$records_dir"
 relays=$(mktemp)
 wanted=$(mktemp)
-trap 'rm -f "$relays" "$wanted"' EXIT
+
+# The watcher's pidfile names that process only while it runs. Left behind, a
+# `SIGTERM` would have the next start read a pid some later process happened to
+# hold. Defined here so the one exit trap below can clean it up from any exit.
+release_watcher_pidfile() {
+	if [ -n "${sleeper:-}" ]; then
+		kill "$sleeper" 2>/dev/null
+	fi
+	[ -r "$watcher_pidfile" ] || return 0
+	read -r recorded <"$watcher_pidfile" || true
+	[ "${recorded:-}" = "$$" ] || return 0
+	rm -f "$watcher_pidfile"
+}
+trap 'rm -f "$relays" "$wanted"; release_watcher_pidfile' EXIT
 
 # The protocol version the daemon must speak for the MCP preambles to be
 # answered. A daemon started before they were added closes those connections
@@ -540,16 +553,40 @@ relay_pass
 
 [ "$watch" = 1 ] || exit 0
 
+# Whether pid $1 is this script's watcher: the shell running it with `--watch`.
+# A pid this boot reissued to another process reads as alive, so the command line
+# is what confirms it, as `is_our_endpoint` confirms an endpoint record.
+is_our_watcher() {
+	[ -r "/proc/$1/cmdline" ] || return 1
+	watcher_argv=$(tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null) || return 1
+	case $watcher_argv in
+	*'junie-ide-relay.sh'*) ;;
+	*) return 1 ;;
+	esac
+	printf '%s\n' "$watcher_argv" | grep -qx -- '--watch'
+}
+
 # One watcher per sandbox: a second start finds the first alive and leaves it be.
-if [ -f "$watcher_pidfile" ]; then
+if [ -r "$watcher_pidfile" ]; then
 	read -r existing <"$watcher_pidfile" || true
-	if [ -n "${existing:-}" ] && kill -0 "$existing" 2>/dev/null; then
+	if [ -n "${existing:-}" ] && is_our_watcher "$existing"; then
 		exit 0
 	fi
 fi
+
+# The file names this process only while it runs, and the exit trap above drops
+# it. Left behind, a `SIGTERM` would have the next start read a pid some later
+# process happened to hold.
+trap 'exit 0' INT TERM HUP
+
 printf '%s\n' "$$" >"$watcher_pidfile"
 
+# `wait` rather than a foreground `sleep`: a shell defers a trap until the
+# command in front of it returns, so a foreground `sleep` would hold the exit
+# trap -- and the pidfile -- for the rest of the interval.
 while :; do
-	sleep "$interval"
+	sleep "$interval" &
+	sleeper=$!
+	wait "$sleeper"
 	relay_pass
 done

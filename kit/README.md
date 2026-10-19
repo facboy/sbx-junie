@@ -53,7 +53,11 @@ override. Set that variable — don't move `JUNIE_HOME` — to relocate the file
   endpoint for the project the sandbox holds, forwards it to that one host port, and writes an
   instance file naming the endpoint's port and pid — Junie only accepts an endpoint whose pid is a
   live process in the sandbox. A second copy runs as a watcher and repeats that pass, so an IDE you
-  open on the host *after* the sandbox started appears without restarting anything.
+  open on the host *after* the sandbox started appears without restarting anything. The watcher
+  records its pid so a later start finds it rather than adding a second, and confirms that pid by its
+  `--watch` command line rather than by the pid alone, since a pid outlives its process; it removes
+  the file as it exits, including on `SIGTERM`, so a stopped watcher leaves nothing for the next
+  start to read.
 
 The two are joined by a one-line preamble: the sandbox endpoint opens each connection with the
 project's digest and the secret `junie-sbx.sh` provisioned for that project, and the host daemon

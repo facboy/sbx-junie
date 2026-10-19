@@ -243,9 +243,22 @@ into the log.
 
 ## Low severity
 
-1. `junie-ide-relay.sh` writes the watcher pidfile and never removes it, so a `SIGTERM`
-   leaves a stale pid and the "one watcher per sandbox" check leans on pid reuse — the
-   exact class of bug the record-reuse code elsewhere in the same file handles carefully.
+1. `junie-ide-relay.sh` wrote the watcher pidfile and never removed it, so a `SIGTERM`
+   left a stale pid and the "one watcher per sandbox" check leaned on pid reuse — the exact
+   class of bug the record-reuse code elsewhere in the same file handles carefully. The
+   check also asked only whether the recorded pid was alive, so any live pid passed it.
+
+   The watcher now removes the file as it exits, and the next start confirms the pid by
+   its `--watch` command line, as `is_our_endpoint` confirms an endpoint record. Removing
+   it at exit needed the loop's wait to be interruptible: a shell defers a trap until the
+   foreground command returns, so `sleep "$interval"` in front of the loop held the exit
+   trap for up to a full 10 s interval. The sleep is backgrounded and `wait`ed on instead,
+   so `SIGTERM` exits at once.
+
+   Verified against the previous revision with a fixture home directory: a pidfile naming
+   a live process that is not a watcher now starts a watcher (before: refused to start),
+   `SIGTERM` leaves no pidfile (before: left one), and a second start still finds the
+   first and exits. Both `dash` and `bash`, and the pass still runs once per interval.
 2. `--secret` on the endpoint defaults to `$JUNIE_IDE_RELAY_SECRET` and nothing else, since
    the launcher never passes the flag. It is dead weight as it stands.
 3. `docs/fragmented-input-sequence.md` says pieces up to 60 ms apart are rejoined;
@@ -294,3 +307,5 @@ into the log.
    failure, the preamble timeout and a per-connection guard.
 7. ~~Unit tests for the relay's parsers and the filter's `split_sequences`~~ — done,
    in `tests/`. Then the version and doc drift.
+8. ~~The watcher pidfile~~ — done; it goes at exit and the recorded pid is confirmed by
+   its `--watch` command line.
