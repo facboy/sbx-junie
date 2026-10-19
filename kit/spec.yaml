@@ -146,3 +146,18 @@ setup:
         - /home/agent/.local/bin/junie-init.sh
       user: agent
       description: Init the home dir so the agent can see the host junie install
+    # Workaround for docs/mouse-report-truncation.md: the CLI reads a mouse report
+    # with a 10 ms per-byte budget, and a report the PTY splits leaves its tail
+    # inserted as typed text. The filter refuses all-motion reporting, so the
+    # hover stream that trips the reader never starts. Clicks and drags stay.
+    # The symlink is removed first because `cp` onto it would write through to
+    # the read-only host mount and fail.
+    - command:
+        - sh
+        - -c
+        - >-
+          rm -f /home/agent/.local/bin/junie
+          && cp /home/agent/.local/bin/junie-mouse-filter.sh /home/agent/.local/bin/junie
+          && chmod +x /home/agent/.local/bin/junie
+      user: agent
+      description: Install the mouse-report filter over the junie symlink
