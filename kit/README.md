@@ -206,6 +206,9 @@ what asks the runtime to start it. The CLI comes from the host instead — the r
 `~/.local/bin` and `~/.local/share/junie` read-only, and `junie-init.sh` symlinks them into
 `/home/agent` at startup so the `junie` entrypoint resolves.
 
+[`../build-image.sh`](../build-image.sh) is the build, tagged with the name this spec's
+`sandbox.image` gives: an image under another tag is one the sandbox never boots.
+
 Junie is not installed into the image, and neither is a browser: both come from the host, so the
 vendor install script never runs and the kit's egress allowlist can name no install host. What the
 image does carry is the libraries the host's browsers link — no template has them, and a mount cannot

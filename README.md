@@ -32,6 +32,17 @@ It exposes `~/.junie` as a read-only bindfs view under
 `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/junie_ro/_junie`, so the sandbox can take the host's Junie
 home as a workspace without write access. Re-running it is a no-op.
 
+## Building the image
+
+```console
+./build-image.sh
+```
+
+It builds [`kit/Dockerfile`](kit/Dockerfile) into `docker.io/facboy/junie-sbx:latest`, the tag
+`kit/spec.yaml` boots from. `IMAGE=me/junie-sbx:test` tags it otherwise, and any argument reaches
+`docker build` — `./build-image.sh --no-cache` after a base bump, or
+`--build-arg PLAYWRIGHT_VERSION=1.61.0` to move the pinned release.
+
 ## Run
 
 With the project the sandbox should hold as the current directory:
