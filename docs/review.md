@@ -88,23 +88,33 @@ stream survives a quiet budget while a stream-less session is closed at it; a 1.
 is delivered byte for byte to a slow reader; and both directions end when either peer
 goes away.
 
-### 3. `junie-tty-filter.py` loses the CLI's exit status and hangs on non-tty stdin
+### 3. `junie-tty-filter.py` lost the CLI's exit status and hung on non-tty stdin — fixed
 
-- The loop breaks on the first EOF from the master before the `waitpid` below it, so
-  `status` stays 0. `junie-tty-filter.py sh -c 'exit 3'` returns 0; add a `printf` first
-  and it returns 3 correctly. A child killed by a signal also reports 0. The wrapper sits
-  between the runtime and the CLI, so every failure and every signal death reads as
-  success — which breaks `--task` and any CI use.
-- With stdin at EOF and not a tty, `os.read` returns `b""`, `stdin_open` goes false, and
-  the `\x04` written into a raw pty is not an EOF. `junie-tty-filter.py sh -c 'cat
-  >/dev/null; echo done' </dev/null` never finishes. Closing the master's write side is
-  what delivers EOF.
+- The loop broke out on the first EOF from the master, before the `waitpid` below it, so
+  `status` stayed 0. `junie-tty-filter.py sh -c 'exit 3'` returned 0; with a `printf`
+  first it returned 3, which is what showed the status was being lost rather than never
+  read. A child killed by a signal also reported 0, so every failure and every signal
+  death read as success — which breaks `--task` and any CI use.
+- With stdin at EOF and not a tty, `os.read` returned `b""`, `stdin_open` went false, and
+  the `\x04` written into a raw pty was not an EOF. `junie-tty-filter.py sh -c 'cat
+  >/dev/null; echo done' </dev/null` never finished.
 
-Two smaller points in the same file: `character_length` checks its length before it checks
-the continuation bytes, so `b"\xe0A"` is reported as partial rather than invalid and waits
-out `HOLD_TIMEOUT`; that costs latency, not correctness. And the `\x1b[?1003h` hold applies
-only to child-to-terminal output, so the two directions repair splits by different means —
-intended, but the difference belongs in the docstring.
+The wrapper now execs the CLI directly when stdin is not a terminal: nothing can fragment
+its input there, the pty is what made stdin's end undeliverable, and this path also keeps
+the exit status without a wrapper around it. On the pty path the loop reaps the child
+before returning, so a non-zero status is reported; a signalled child re-raises the same
+signal after the terminal is restored, so the caller sees a signal death rather than an
+exit code. When the terminal the wrapper reads goes away, the child now gets `SIGHUP`
+instead of a `^D` byte a raw pty would only deliver as typed input.
+
+The same pass made `character_length` end an invalid UTF-8 lead after one byte instead of
+waiting out the hold for bytes that cannot form a character.
+
+Verified with a real pty and with stdin on `/dev/null`: `exit 3` reports 3 with and without
+output, a `SIGTERM`ed child reports `-15`, a closed terminal ends the child with `SIGHUP`,
+`cat >/dev/null` terminates, a missing command reports 127, and the `ESC[?1003h` rewrite
+and whole-sequence delivery are unchanged. The previous revision hangs on the `/dev/null`
+case and returns 0 for `exit 3`.
 
 ## Medium severity
 
@@ -210,7 +220,7 @@ into the log.
 ## Priority
 
 1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`.
-2. The exit status and stdin EOF in `junie-tty-filter.py`, which silently break `--task`.
+2. ~~The exit status and stdin EOF in `junie-tty-filter.py`~~ — done.
 3. Idempotent, non-interactive home init in `junie-sbx.sh`; the missing bindfs presence
    check in `setup-junie-sbx.sh`.
 4. Per-connection error handling in the daemon: the non-ASCII secret, bind failure, a
