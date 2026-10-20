@@ -32,7 +32,10 @@ The reply side is read the same way: a `tools/list` result, in a batch as in a
 single reply, loses the tools the allowlist withholds. The daemon cannot open a
 compressed body, so it drops the client's `Accept-Encoding` on the way to the IDE,
 and a reply it still cannot read ends the session rather than reaching the client
-unfiltered.
+unfiltered. A head that names its framing twice, or frames a chunk with something
+that is not a hex size, is refused as unreadable: the body this daemon checked and
+the body the IDE reads would otherwise differ. Both reads are bounded, by
+`MAX_HEAD` and `MAX_MESSAGE`, since each holds what it reads in memory.
 
 A session's `GET /stream` stays open for the life of the session, and the CLI
 sends its requests on the same connection while nothing is written to that
@@ -181,13 +184,17 @@ DEFAULT_ALLOW_TOOLS = (
 )
 DISPATCHER_TOOL = "execute_tool"
 TOOL_LIST_MARKER = "Available tools: "
-REFUSED_REPLY = ('{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,'
-                 '"message":"Tool \'%s\' is not available"}}')
 # A request body the filter cannot read names no tool it can check, so it is
 # answered rather than forwarded: forwarding it would run whatever it holds.
 PARSE_ERROR_REPLY = (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
                      b'"message":"Request body could not be read"}}')
 MAX_PREAMBLE = 256
+# The largest head and message the daemon will buffer before it gives up on one.
+# Both are read into memory to be parsed, and a client that sends neither a
+# boundary nor an end would otherwise cost the daemon as much memory as it cared
+# to send. A tool listing is a few kilobytes, so neither is a tight budget.
+MAX_HEAD = 64 * 1024
+MAX_MESSAGE = 8 << 20
 # How long a whole preamble may take to arrive. A client that connects and stalls
 # would otherwise hold the thread that serves it, and the accept loop starts one
 # per connection, so a local process could accumulate them. Long enough for a
@@ -648,6 +655,20 @@ def mcp_port_for_digest(instances_dir, digest):
     return "port", port
 
 
+def chunk_size(line):
+    """The size a chunk's first line names, or None when it names none.
+
+    A chunk size is hexadecimal digits only, optionally followed by `;` and an
+    extension. `int(..., 16)` also accepts a `0x` prefix and surrounding space,
+    which no chunk frames with, so a line it takes on those terms would be read as
+    a size this reader and the IDE's disagree about.
+    """
+    text = line.split(b";", 1)[0]
+    if not text or any(byte not in b"0123456789abcdefABCDEF" for byte in text):
+        return None
+    return int(text, 16)
+
+
 class HttpConnection:
     """A socket and the bytes already read past the last message boundary.
 
@@ -684,8 +705,16 @@ class HttpConnection:
         return True
 
     def read_head(self):
-        """The next head, its closing CRLFCRLF included, or None at EOF."""
+        """The next head, its closing CRLFCRLF included, or None at EOF.
+
+        A head that runs past `MAX_HEAD` without its boundary is a client sending
+        something that is not a message, so it is treated as the end of the
+        connection: buffering it would cost the daemon whatever the peer cared to
+        send.
+        """
         while b"\r\n\r\n" not in self.buffer:
+            if len(self.buffer) > MAX_HEAD:
+                return None
             if not self.fill():
                 return None
         head, _, rest = self.buffer.partition(b"\r\n\r\n")
@@ -699,6 +728,8 @@ class HttpConnection:
         the bytes already buffered for it: a timeout leaves the connection as it
         was for the caller to retry, and an EOF leaves nothing to retry.
         """
+        if count < 0 or count > MAX_MESSAGE:
+            return None
         while len(self.buffer) < count and self.fill():
             pass
         if len(self.buffer) < count:
@@ -707,16 +738,25 @@ class HttpConnection:
         return data
 
     def read_chunked(self):
-        """A chunked body as the raw bytes that frame it, or None if malformed."""
+        """A chunked body as the raw bytes that frame it, or None if malformed.
+
+        Stops at whichever comes first, the terminating chunk or `MAX_MESSAGE`:
+        the body is held in memory to be parsed, so a chunked message with no end
+        is bounded rather than buffered.
+        """
         raw = []
+        total = 0
         while True:
             frame = self.read_chunk_frame()
             if frame is None:
                 return None
             data, last = frame
             raw.append(data)
+            total += len(data)
             if last:
                 return b"".join(raw)
+            if total > MAX_MESSAGE:
+                return None
 
     def read_chunk_frame(self):
         """One chunk of a chunked body, its framing included.
@@ -747,9 +787,8 @@ class HttpConnection:
         end = self.buffer.find(b"\r\n")
         if end < 0:
             return None
-        try:
-            size = int(self.buffer[:end].split(b";", 1)[0].strip() or b"0", 16)
-        except ValueError:
+        size = chunk_size(self.buffer[:end])
+        if size is None:
             return None, False, 0
         if size == 0:
             index = end + 2
@@ -777,6 +816,22 @@ def parse_head(head):
         if sep:
             headers[name.strip().lower()] = value.strip()
     return lines[0], headers
+
+
+def framing_conflict(head):
+    """Whether a head names either framing header more than once.
+
+    `parse_head` keeps the last value, which is one reading of a head that names
+    its length twice, and the daemon would forward the head with both intact: the
+    body it checked and the body the IDE reads could then differ. No client sends
+    two, so a head that does is refused as unreadable.
+    """
+    seen = {}
+    for line in head.split(b"\r\n")[1:]:
+        name = line.partition(b":")[0].strip().lower()
+        if name in (b"content-length", b"transfer-encoding"):
+            seen[name] = seen.get(name, 0) + 1
+    return any(count > 1 for count in seen.values())
 
 
 def read_body(conn, headers):
@@ -943,9 +998,8 @@ def decode_chunked(raw):
     rest = raw
     while True:
         line, _, rest = rest.partition(b"\r\n")
-        try:
-            size = int(line.split(b";", 1)[0].strip() or b"0", 16)
-        except ValueError:
+        size = chunk_size(line)
+        if size is None:
             return None
         if size == 0:
             return bytes(payload)
@@ -1221,7 +1275,11 @@ def splice_mcp(client, upstream, allow):
         name = refused_tool(message.get("params"), allow)
         if name is None:
             return None
-        return (REFUSED_REPLY % (json.dumps(message.get("id")), name)).encode()
+        return json.dumps({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "error": {"code": -32601, "message": "Tool '%s' is not available" % name},
+        }).encode()
 
     def first_refusal(calls):
         """The reply refusing the first call outside `allow`, or None.
@@ -1288,6 +1346,7 @@ def splice_mcp(client, upstream, allow):
                     continue
                 note_activity()
                 _, headers = parse_head(head)
+                unreadable = framing_conflict(head)
                 body = read_body_or_lull(client_conn, headers)
                 if body is None:
                     return
@@ -1296,7 +1355,7 @@ def splice_mcp(client, upstream, allow):
                     # a list; both are decoded here, and a message the filter
                     # cannot read is answered rather than forwarded -- forwarding
                     # it would run whatever calls it holds without checking them.
-                    message = read_message(head, body)
+                    message = None if unreadable else read_message(head, body)
                     if message is None:
                         reply = refused_head(session.get("id"), PARSE_ERROR_REPLY,
                                              b"400 Bad Request")
@@ -1320,6 +1379,8 @@ def splice_mcp(client, upstream, allow):
                             return
                         continue
                 if finished.is_set():
+                    return
+                if unreadable:
                     return
                 # A reply the daemon cannot parse cannot be filtered, so the IDE
                 # is asked for one it can read.

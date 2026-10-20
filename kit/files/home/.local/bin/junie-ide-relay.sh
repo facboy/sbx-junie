@@ -242,14 +242,19 @@ endpoint_for_digest() {
 # the same way, and tearing down a working mirror for it would drop the IDE MCP
 # connection until the next pass rebuilt it.
 mcp_port_for_digest() {
+	# The secret comes from the environment this script exported, not from an
+	# argument: any local process can read a process list, which is how
+	# `is_our_endpoint` identifies an endpoint.
 	reply=$(python3 -c '
-import socket, sys
+import os, socket, sys
 try:
     conn = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)
-    conn.sendall(("JUNIE-RELAY 1 mcp-port %s %s\n" % (sys.argv[3], sys.argv[4])).encode())
+    preamble = "JUNIE-RELAY 1 mcp-port %s %s\n" % (
+        sys.argv[3], os.environ["JUNIE_IDE_RELAY_SECRET"])
+    conn.sendall(preamble.encode())
     sys.stdout.write(conn.recv(64).decode("ascii", "replace"))
 except Exception:
-    pass' "$ide_host" "$relay_port" "$1" "$secret" 2>/dev/null)
+    pass' "$ide_host" "$relay_port" "$1" 2>/dev/null)
 	case $reply in
 	'JUNIE-RELAY 1 mcp-port '*) reply=${reply#JUNIE-RELAY 1 mcp-port } ;;
 	*) printf 'unknown\n' ; return 0 ;;

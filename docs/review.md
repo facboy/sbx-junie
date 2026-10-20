@@ -447,15 +447,15 @@ into the log. The second pass reproduced it in both copies of `splice` and fixed
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
 file was read again, and `bash -n` and `dash -n` are clean. Items 1 to 4 were fixed after that
-read, so `python3 -m unittest discover -s tests` now runs 65 cases. The shell-side fixes behave as
+read, so `python3 -m unittest discover -s tests` now runs 71 cases. The shell-side fixes behave as
 the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
 non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 6 are fixed; the low-severity
-points stand.
+The relay's newer code is where the faults are. Items 1 to 6, and four of the low-severity
+points, are fixed; the rest stand.
 
 ### High severity
 
@@ -616,18 +616,24 @@ directory. The previous revision creates the literal `~` tree there instead.
 
 1. The refusal body formats the tool name into a JSON template, so a quoted name produces
    invalid JSON: `{"message":"Tool 'evil"tool\x' is not available"}`. `json.dumps` on the id
-   and the name.
+   and the name. — fixed: the reply is built with `json.dumps`, and a case drives a call
+   whose name closes the string.
 2. `junie-ide-relay.sh`'s `mcp_port_for_digest` passes the secret as `sys.argv[4]` to its
    inline probe, so it is in the process list that the same file's comments keep it out of.
    Nothing inside the sandbox gains from it; the rule the endpoints follow is what it
-   breaks.
+   breaks. — fixed: the probe reads `JUNIE_IDE_RELAY_SECRET` from the environment the script
+   exports, and the probe's argv was checked while it ran to confirm the secret is not in it.
 3. A head naming its framing twice (`Content-Length: 24` and `Content-Length: 46`) is
    checked against the last value and forwarded with both, and `"0x4"` is accepted as a
    chunk size. No working bypass follows — the checked range has to be valid JSON, and the
    shorter IDE-side range would have to be a prefix of it — but refusing a second framing
-   header costs less than that argument does.
+   header costs less than that argument does. — fixed: `framing_conflict` refuses such a
+   head as unreadable, and `chunk_size` takes hex digits only, so `0x4` and a padded size are
+   no longer read differently here than by the IDE.
 4. `HttpConnection.read_head` and the chunked accumulation in `read_body_or_lull` have no
    cap: 8 MB of headers without a terminator were buffered with the thread still reading.
+   — fixed: `MAX_HEAD` and `MAX_MESSAGE` bound both, and a declared length past the cap is
+   never buffered.
 5. `setup-junie-sbx.sh` still creates `${JUNIE_RO}/_local/bin/junie`, left from `2d0b53f`.
    Nothing mounts `junie_ro/_local`; `junie-sbx.sh` mounts `~/.local/bin` itself. Dead step,
    and the `ln -s` aborts the script under `set -e` if that path is ever a real directory.
@@ -663,5 +669,5 @@ payload the list is drawn against.
 4. ~~The `splice` write error~~ — done, in both copies; `tests/test_splice.py` covers them.
 5. ~~The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`~~ — done; `tests/test_endpoint.py`
    covers the bind.
-6. The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
-   caps.
+6. ~~The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
+   caps~~ — done; `MAX_HEAD` and `MAX_MESSAGE` bound the two reads.

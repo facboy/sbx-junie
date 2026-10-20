@@ -157,6 +157,16 @@ class AllowlistTest(unittest.TestCase):
         self.assertIn(WITHHELD, refusal["error"]["message"])
         self.assertTrue(session.ide_is_silent())
 
+    def test_a_refusal_naming_a_quoted_tool_is_valid_json(self):
+        # The name is whatever the client sent, so it can close a JSON string
+        # built by formatting it in. The reply has to parse either way.
+        session = self.session()
+        name = 'execute"tool\\x'
+        session.send(call(name))
+        self.assertEqual(session.reply_to_client()["error"]["message"],
+                         "Tool '%s' is not available" % name)
+        self.assertTrue(session.ide_is_silent())
+
     def test_withheld_notification_is_refused_with_a_null_id(self):
         session = self.session()
         session.send(json.dumps({"jsonrpc": "2.0", "method": "tools/call",
@@ -428,6 +438,54 @@ class ParserTest(unittest.TestCase):
                          b"Wikipedia")
         self.assertIsNone(relayd.decode_chunked(b"zz\r\nWiki\r\n0\r\n\r\n"))
 
+    def test_chunk_size_takes_hex_digits_and_nothing_int_would_also_accept(self):
+        self.assertEqual(relayd.chunk_size(b"4"), 4)
+        self.assertEqual(relayd.chunk_size(b"1f"), 31)
+        self.assertEqual(relayd.chunk_size(b"4;ext=1"), 4)
+        # `int(line, 16)` takes these too, which no chunk frames with.
+        self.assertIsNone(relayd.chunk_size(b"0x4"))
+        self.assertIsNone(relayd.chunk_size(b" 4"))
+        self.assertIsNone(relayd.chunk_size(b""))
+
+    def test_a_head_naming_its_framing_twice_is_a_conflict(self):
+        self.assertFalse(relayd.framing_conflict(
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 2\r\n\r\n"))
+        self.assertFalse(relayd.framing_conflict(
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"))
+        self.assertTrue(relayd.framing_conflict(
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\n"))
+        self.assertTrue(relayd.framing_conflict(
+            b"POST /mcp HTTP/1.1\r\ncontent-length: 2\r\nContent-Length: 5\r\n\r\n"))
+
+    def test_a_head_with_no_boundary_gives_up_at_the_cap(self):
+        near, far = socket.socketpair()
+        self.addCleanup(near.close)
+        self.addCleanup(far.close)
+        conn = relayd.HttpConnection(near)
+        # Bytes already read past the cap, with no boundary among them: the head
+        # is not a message, so it is the end of the connection rather than growth.
+        conn.buffer = b"X-Pad: " + b"a" * (relayd.MAX_HEAD + 1)
+        self.assertIsNone(conn.read_head())
+
+    def test_a_declared_length_past_the_cap_is_not_buffered(self):
+        near, far = socket.socketpair()
+        self.addCleanup(near.close)
+        self.addCleanup(far.close)
+        conn = relayd.HttpConnection(near)
+        self.assertIsNone(conn.read_exact(relayd.MAX_MESSAGE + 1))
+        self.assertIsNone(conn.read_exact(-1))
+
+    def test_a_chunked_body_with_no_end_stops_at_the_cap(self):
+        near, far = socket.socketpair()
+        self.addCleanup(near.close)
+        self.addCleanup(far.close)
+        conn = relayd.HttpConnection(near)
+        frame = b"10000\r\n" + b"a" * 0x10000 + b"\r\n"
+        # A megabyte per round, all of it short of the cap together only after
+        # several: the reader must stop rather than grow without limit.
+        conn.buffer = frame * (relayd.MAX_MESSAGE // len(frame) + 2)
+        self.assertIsNone(conn.read_chunked())
+
     def test_read_chunked_keeps_the_framing(self):
         near, far = socket.socketpair()
         self.addCleanup(near.close)
@@ -465,6 +523,7 @@ class ParserTest(unittest.TestCase):
                          (None, None))
         self.assertEqual(relayd.split_digest_secret((digest + " " + "z" * 64).encode()),
                          (None, None))
+
 
     def test_hex_predicates_reject_the_wrong_length_and_alphabet(self):
         self.assertTrue(relayd.is_digest(b"0123456789abcdef" * 2))
