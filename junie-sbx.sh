@@ -23,15 +23,37 @@ USER_PNPM_CACHE="${HOME}/.cache/pnpm"
 USER_PW_CACHE="${HOME}/.cache/ms-playwright"
 
 PROJ="$(basename "$(pwd)")"
+# The state directory is keyed on the project's whole path, not just its name:
+# two checkouts whose directories happen to share a name are two projects, and
+# their sessions and caches must not mix. The relay secret is keyed on the same
+# path, so the two name the same project.
+PROJ_KEY="$(python3 -c 'import hashlib, sys; print(hashlib.md5(sys.argv[1].encode()).hexdigest())' \
+	"${PWD}")"
 
 # One directory per project holds everything that project's sandbox leaves behind:
 # the Junie home it writes to, and the overlays that layer its uv and pnpm writes
 # over the host's read-only trees. Overlays are a sibling of the Junie home, not
 # inside it -- the Junie home is mounted into the sandbox, and a mount nested
 # under it would both be unreliable and expose the writable layer to the agent.
-PROJ_DIR="${SBX_STATE_DIR}/${PROJ}"
+PROJ_DIR="${SBX_STATE_DIR}/${PROJ}-${PROJ_KEY}"
 JUNIE_HOME="${PROJ_DIR}/_junie"
 OV_ROOT="${PROJ_DIR}/overlays"
+
+# The directory used to be named for the project alone, so state an earlier run
+# left sits beside the new one. Its `_junie` holds the sessions the CLI recorded,
+# so it is renamed the first time rather than abandoned. A directory with an
+# overlay still mounted under it is left where it is: that mount is a path inside
+# it, and moving it would leave the mount naming nothing.
+LEGACY_DIR="${SBX_STATE_DIR}/${PROJ}"
+if [[ -d "${LEGACY_DIR}" && ! -e "${PROJ_DIR}" ]]; then
+	if grep -qF " ${LEGACY_DIR}/" /proc/self/mounts 2> /dev/null; then
+		echo "junie-sbx: leaving ${LEGACY_DIR} in place: an overlay under it is" >&2
+		echo "  still mounted, so its sessions start fresh in ${PROJ_DIR}" >&2
+	elif ! mv "${LEGACY_DIR}" "${PROJ_DIR}" 2> /dev/null; then
+		echo "junie-sbx: could not move ${LEGACY_DIR} to ${PROJ_DIR}," >&2
+		echo "  so this run starts from a fresh state directory" >&2
+	fi
+fi
 
 # Per-project settings: which of the host's tool trees this project's sandbox
 # gets, and the host paths it mounts beyond them. They come from

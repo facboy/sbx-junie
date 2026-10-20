@@ -60,9 +60,9 @@ cd ~/git/some-project
 ```
 
 The script assumes this repo is cloned at `~/git/sbx-junie`, and takes the current directory as the
-sandbox's project — its basename names a per-project directory, and the directory itself is the
-writable workspace mount. It runs the CLI with the provider `ollama` and the model
-`deepseek-v4.1-flash:cloud`, the model being pinned only for that provider.
+sandbox's project — the directory itself is the writable workspace mount, and its name and the
+digest of its path name the per-project state directory. It runs the CLI with the provider
+`ollama` and the model `deepseek-v4.1-flash:cloud`, the model being pinned only for that provider.
 `JUNIE_SBX_PROVIDER` and `JUNIE_SBX_MODEL` override either, and `JUNIE_SBX_PROVIDER=` passes no
 provider at all, which is how the kit's credentials — a `JUNIE_API_KEY`, or a BYOK key the proxy
 injects — get used instead of a local Ollama. `JUNIE_SBX_MODEL=` likewise passes no model.
@@ -98,8 +98,9 @@ environment variable rather than by copying them somewhere else:
   since the pnpm that matches your store needs the node it was built for.
 - `~/.cache/uv` and the pnpm store under `~/.local/share/pnpm` are mounted through a per-project
   overlay: your copies are the read-only lower layer, and everything the sandbox writes goes to an
-  upper layer under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>/overlays`, never to
-  the host trees. That is what lets `uv` and `pnpm` reuse a cache instead of re-downloading.
+  upper layer under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<name>-<digest>/overlays`,
+  never to the host trees. That is what lets `uv` and `pnpm` reuse a cache instead of
+  re-downloading.
   `pnpm`'s store and cache paths reach it through a `~/.npmrc` that `junie-init.sh` writes.
 - `~/.cache/ms-playwright` is overlaid the same way, for the same reason: `npx playwright install`
   writes there, so the sandbox needs somewhere to put a browser without touching your cache.
@@ -355,9 +356,14 @@ Stop the host daemon when you are done with the IDE connection — it is a plain
 `systemctl --user disable --now junie-ide-relayd` also keeps it from starting at the next login.
 Ending the sandbox leaves it running, and it holds only a listening socket.
 
-Each project gets one directory under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/<project>`:
-`_junie/` is the Junie home the sandbox writes to, and `overlays/` holds the writable uv and pnpm
-layers. Remove that directory to drop the state for a project you have finished with.
+Each project gets one directory under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/sbx-state/`, named
+`<name>-<digest>`: the project directory's own name and the digest of its path, which is the digest
+the relay secret is filed under too. Two checkouts whose directories share a name are two projects,
+and their sessions and caches stay apart. `_junie/` is the Junie home the sandbox writes to, and
+`overlays/` holds the writable uv and pnpm layers. Remove that directory to drop the state for a
+project you have finished with. A directory named for the project alone, from before the digest was
+added, is renamed to the new name on the first run that finds it, so its sessions carry over; one
+with an overlay still mounted under it is left where it is, and says so.
 
 Delete a project's file under `${XDG_CONFIG_HOME:-~/.config}/junie-sbx/relay-secrets` to revoke that
 sandbox's access to the host's IDEs; a later run provisions a fresh secret.

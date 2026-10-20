@@ -454,7 +454,7 @@ is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 6, and five of the low-severity
+The relay's newer code is where the faults are. Items 1 to 6, and six of the low-severity
 points, are fixed; the rest stand.
 
 ### High severity
@@ -641,7 +641,14 @@ directory. The previous revision creates the literal `~` tree there instead.
    now finishes where the previous revision stopped with `ln: Already exists`.
 6. `PROJ_DIR` is keyed on `basename $PWD` while the secret is keyed on the full path, so two
    checkouts whose directories share a name share one `_junie` home and both overlay trees —
-   their sessions and caches mix — while their secrets stay distinct.
+   their sessions and caches mix — while their secrets stay distinct. — fixed: the directory is
+   `<name>-<digest>`, keyed on the same digest the secret is, so two checkouts of one name get a
+   home and overlays each. Verified with a stub `sbx` over `one/proj` and `two/proj`: the two
+   state directories differ, a rerun of the same project reuses its own, and each has its own
+   secret record. State an earlier run left under the old name is renamed the first time the new
+   name is absent, so its sessions carry over; a directory with an overlay still mounted under it
+   is left in place, named on stderr, since moving a mountpoint's parent is not something a state
+   directory should do.
 7. `tests/scripts.py` sets `dont_write_bytecode` at import, which is too late for itself and
    `tests/__init__.py`, so a run leaves `tests/__pycache__/` behind. Gitignored, and the
    docstring's claim is about the kit file alone.
