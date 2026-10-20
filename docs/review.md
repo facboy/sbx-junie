@@ -265,8 +265,10 @@ into the log.
    preamble already used it for. A secret on a command line is readable by any local
    process through `/proc`, which `is_our_endpoint` itself relies on, so the flag was also
    a trap for whoever wired it up next.
-3. `docs/fragmented-input-sequence.md` says pieces up to 60 ms apart are rejoined;
-   `HOLD_TIMEOUT` is 0.05 s.
+3. `docs/fragmented-input-sequence.md` said pieces up to 60 ms apart are rejoined, where
+   `HOLD_TIMEOUT` is 0.05 s. It now says 50 ms and names the constant. Measured through the
+   filter on a pty with an escape sequence split in two: rejoined for a gap of 46 and 49 ms,
+   released as two reads at 54 ms, with the boundary between them depending on scheduling.
 4. `kit/Dockerfile` pins Playwright 1.63.0, while `kit/README.md` gives advice anchored to
    1.61. Not contradictory, but the two are drifting.
 5. A `mounts` entry that is only `:ro` reduces to an empty path and is reported as "no host
@@ -314,3 +316,4 @@ into the log.
 8. ~~The watcher pidfile~~ — done; it goes at exit and the recorded pid is confirmed by
    its `--watch` command line.
 9. ~~The endpoint's unused `--secret` flag~~ — done; the environment is the only source.
+10. ~~The 60 ms claim in `docs/fragmented-input-sequence.md`~~ — done; it says 50 ms.
