@@ -47,7 +47,8 @@ recorded after the first run is picked up by the next.
 It builds [`kit/Dockerfile`](kit/Dockerfile) into `docker.io/facboy/junie-sbx:latest`, the tag
 `kit/spec.yaml` boots from. `IMAGE=me/junie-sbx:test` tags it otherwise, and any argument reaches
 `docker build` — `./build-image.sh --no-cache` after a base bump, or
-`--build-arg PLAYWRIGHT_VERSION=1.61.0` to move the pinned release.
+`--build-arg PLAYWRIGHT_VERSION=<release>` to move the pinned release, which the Dockerfile's `ARG`
+names.
 
 ## Run
 

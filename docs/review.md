@@ -269,8 +269,13 @@ into the log.
    `HOLD_TIMEOUT` is 0.05 s. It now says 50 ms and names the constant. Measured through the
    filter on a pty with an escape sequence split in two: rejoined for a gap of 46 and 49 ms,
    released as two reads at 54 ms, with the boundary between them depending on scheduling.
-4. `kit/Dockerfile` pins Playwright 1.63.0, while `kit/README.md` gives advice anchored to
-   1.61. Not contradictory, but the two are drifting.
+4. `kit/Dockerfile` pins Playwright 1.63.0, while the root `README.md` gave
+   `--build-arg PLAYWRIGHT_VERSION=1.61.0` as its example — a version the pin had already left
+   behind, so the documented way to move the release named a downgrade. The example no longer
+   carries a version: it says `<release>` and points at the Dockerfile's `ARG`, which is the one
+   place the pin lives. The `1.61` statements in [Browser libraries](../README.md#browser-libraries)
+   stay, since they record when Playwright began picking the 26.04 WebKit bundle rather than what
+   this image pins.
 5. A `mounts` entry that is only `:ro` reduces to an empty path and is reported as "no host
    path", which is true but not the setting that was wrong. The same unconditional strip
    makes a real directory whose name ends in `:ro` unmountable, since the suffix is removed
@@ -317,3 +322,5 @@ into the log.
    its `--watch` command line.
 9. ~~The endpoint's unused `--secret` flag~~ — done; the environment is the only source.
 10. ~~The 60 ms claim in `docs/fragmented-input-sequence.md`~~ — done; it says 50 ms.
+11. ~~The stale Playwright version in the README's build-arg example~~ — done; it names no
+    version.
