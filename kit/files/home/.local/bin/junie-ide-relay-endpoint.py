@@ -34,7 +34,9 @@ def splice(client, upstream):
     """Relay both directions until each has seen EOF from the other.
 
     EOF is propagated as a half-close rather than a teardown, so a client that
-    shuts down its write side after sending still receives the reply.
+    shuts down its write side after sending still receives the reply. A write the
+    far side cannot take ends the splice: a closed peer is a routine disconnect,
+    not a failure to report.
     """
     peers = {client: upstream, upstream: client}
     open_directions = {client, upstream}
@@ -56,7 +58,14 @@ def splice(client, upstream):
                     except OSError:
                         pass
                     continue
-                peers[source].sendall(data)
+                try:
+                    peers[source].sendall(data)
+                except OSError:
+                    # The peer this was for has gone, so nothing is left to
+                    # deliver in either direction.
+                    open_directions.discard(source)
+                    open_directions.discard(peers[source])
+                    break
     finally:
         for sock in peers:
             sock.close()

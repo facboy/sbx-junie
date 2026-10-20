@@ -278,14 +278,13 @@ budget; and a forced exception inside `handle` is logged as `connection failed` 
 socket closed. A live daemon still answers `health` with its protocol version and rejects a
 secretless preamble.
 
-### 9. `splice` re-raises a write error — still open
+### 9. `splice` re-raises a write error — fixed in the second pass
 
-`peers[source].sendall` sits outside the `try` that guards `recv`, so a peer closing its
-read side raises `BrokenPipeError` out of `splice_to`/`relay_rpc` (reproduced). The
-`finally` closes the sockets, so nothing leaks, but a routine disconnect writes a traceback
-into the log. The second pass reproduced it again in both copies of `splice`, the daemon's
-and the endpoint's; see
-[Second review, item 4](#4-splice-still-re-raises-a-write-error).
+`peers[source].sendall` sat outside the `try` that guarded `recv`, so a peer closing its
+read side raised `BrokenPipeError` out of `splice_to`/`relay_rpc` (reproduced). The
+`finally` closed the sockets, so nothing leaked, but a routine disconnect wrote a traceback
+into the log. The second pass reproduced it in both copies of `splice` and fixed both; see
+[Second review, item 4](#4-splice-re-raises-a-write-error-fixed).
 
 ## Low severity
 
@@ -441,21 +440,21 @@ and the endpoint's; see
 19. ~~The filter's shared deadline and its blocking output write~~ — done; the holds have
     separate budgets, and the terminal is fed by a thread so a stalled one cannot wedge
     input.
-20. The `splice` write error — open; see
-    [Second review, item 4](#4-splice-still-re-raises-a-write-error).
+20. ~~The `splice` write error~~ — done in the second pass; see
+    [item 4](#4-splice-re-raises-a-write-error-fixed).
 
 ## Second review
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
-file was read again, and `bash -n` and `dash -n` are clean. Item 1 was fixed after that read,
-so `python3 -m unittest discover -s tests` now runs 59 cases. The shell-side fixes behave as
+file was read again, and `bash -n` and `dash -n` are clean. Items 1 to 4 were fixed after that
+read, so `python3 -m unittest discover -s tests` now runs 62 cases. The shell-side fixes behave as
 the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
 non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 3 are fixed; the rest stand.
+The relay's newer code is where the faults are. Items 1 to 4 are fixed; the rest stand.
 
 ### High severity
 
@@ -569,13 +568,22 @@ three above end to end, and still shows a chunked stream pumped chunk by chunk.
 
 ### Medium severity
 
-#### 4. `splice` still re-raises a write error
+#### 4. `splice` re-raises a write error — fixed
 
-Item 9 of the first pass, which its priority list never named, and unchanged. `sendall`
-sits outside the guard that wraps `recv`, so a peer that has closed its read side raises
-`BrokenPipeError` out of `splice` (reproduced in both copies). In the daemon `serve` catches
-it and writes `connection failed: BrokenPipeError` for a routine disconnect; the endpoint's
-copy has no guard, so its connection thread dies without a word.
+Item 9 of the first pass, which its priority list never named. `sendall` sat outside the
+guard that wraps `recv`, so a peer that had closed its read side raised `BrokenPipeError` out
+of `splice` (reproduced in both copies). In the daemon `serve` caught it and wrote
+`connection failed: BrokenPipeError` for a routine disconnect; the endpoint's copy had no
+guard, so its connection thread died without a word.
+
+The write is inside the guard now, and a failure drops both directions: a socket that cannot
+take a write has nothing left to deliver, so the splice ends rather than raising. Both copies
+carry the same change, since neither calls the other.
+
+Verified over socket pairs, against both copies: bytes cross in each direction, a peer whose
+far end is closed ends the splice with nothing raised and the thread gone, and a client that
+only half-closes still receives its reply. `tests/test_splice.py` runs all three over the
+daemon's copy and the endpoint's; both fail on the previous revision with `BrokenPipeError`.
 
 #### 5. The endpoint needs IPv6 to start at all
 
@@ -642,7 +650,7 @@ payload the list is drawn against.
 2. ~~The batch reply scrub~~ — done; `scrub_payload` reads a batch member by member.
 3. ~~A reply the filter cannot read~~ — done; `Accept-Encoding` is dropped on the way out,
    `is_bounded` reads a declared length first, and an unreadable reply ends the session.
-4. The `splice` write error, in both copies.
+4. ~~The `splice` write error~~ — done, in both copies; `tests/test_splice.py` covers them.
 5. The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`.
 6. The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
    caps.

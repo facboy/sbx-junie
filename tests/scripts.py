@@ -1,8 +1,8 @@
 """The repository's scripts, loaded as modules.
 
-Neither relay half is importable by name: the daemon has no `.py` suffix, and the
-filter is shipped as a file the image copies into place. Loading them writes no
-bytecode, so a test run leaves nothing beside a file the image carries.
+None of the three scripts is importable by name: the daemon has no `.py` suffix, and
+the endpoint and the filter are shipped as files the image copies into place. Loading
+them writes no bytecode, so a test run leaves nothing beside a file the image carries.
 """
 import importlib.machinery
 import importlib.util
@@ -25,4 +25,5 @@ def load(name, path):
 
 
 relayd = load("junie_ide_relayd", ROOT / "bin" / "junie-ide-relayd")
+endpoint = load("junie_ide_relay_endpoint", KIT_BIN / "junie-ide-relay-endpoint.py")
 tty_filter = load("junie_tty_filter", KIT_BIN / "junie-tty-filter.py")

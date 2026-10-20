@@ -1012,7 +1012,8 @@ def splice(client, upstream):
     An EOF is propagated as a half-close rather than a teardown: a client that
     sends a request and then shuts down its write side would otherwise have the
     reply it is still waiting for discarded, because the read loop returned
-    before the IDE answered.
+    before the IDE answered. A write the far side cannot take ends the splice,
+    since a peer that has closed is a routine disconnect rather than a fault.
     """
     peers = {client: upstream, upstream: client}
     open_directions = {client, upstream}
@@ -1034,7 +1035,15 @@ def splice(client, upstream):
                     except OSError:
                         pass
                     continue
-                peers[source].sendall(data)
+                try:
+                    peers[source].sendall(data)
+                except OSError:
+                    # The peer this was for has gone: a socket that cannot take
+                    # a write has nothing left to deliver, so both directions
+                    # end here rather than raising out of the splice.
+                    open_directions.discard(source)
+                    open_directions.discard(peers[source])
+                    break
     finally:
         for sock in peers:
             sock.close()
