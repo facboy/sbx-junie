@@ -243,6 +243,8 @@ wrapper holds each sequence until it ends and writes it in one piece, and rewrit
 `ESC[?1002h`. The terminal treats tracking modes 1000, 1002 and 1003 as one setting, so that drops
 the report per mouse movement — the stream behind most of those fragments, and 6628 dispatches that
 found no handler in 14 minutes of hovering — while press, release and drag reports keep arriving.
+The `ESC[?1003l` the CLI sends on exit passes through unchanged, and so turns tracking off
+altogether rather than leaving 1002 on.
 With no terminal on stdin the wrapper skips the PTY and execs the CLI, since nothing can fragment
 its input there and a PTY whose stdin has ended cannot be closed. The CLI's exit status passes
 through in both paths, and a signalled CLI kills the wrapper with the same signal.

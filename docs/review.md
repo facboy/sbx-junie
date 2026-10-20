@@ -295,20 +295,60 @@ into the log.
    still resolve and reach `sbx` unchanged; a missing path, an empty entry, an embedded
    newline and a non-list still exit 1; and the previous revision reports the bare marker as
    "no host path".
-6. `junie-init.sh` appends to `~/.npmrc` only when the key is absent, so a stale
-   `store-dir` from an earlier sandbox is never corrected.
-7. `kit/README.md` and `kit/spec.yaml` both give the `1003h` → `1002h` rewrite without the
-   `1003l` half, which the module docstring does explain.
+6. `junie-init.sh` appended to `~/.npmrc` only when the key was absent, so a stale
+   `store-dir` or `cache-dir` from an earlier sandbox was never corrected. The overlay it
+   named belongs to another project's state directory and is not mounted here, so pnpm
+   kept its store and cache where nothing of this sandbox's was written.
+
+   Each key is now rewritten on every start: the line naming it goes and the current one is
+   appended, leaving the rest of the file alone. A key is recognised by a literal prefix
+   rather than a pattern, so a path holding regex or glob characters reads as itself and
+   `stores-dir` is not taken for `store-dir`.
+
+   Verified by running the script under `dash` against fixture homes: a file holding a stale
+   `store-dir` and `cache-dir` beside a registry line and another key ends with the current
+   values and the other lines intact, a rerun writes an identical file, a home with no
+   `.npmrc` gets one holding both keys, and the previous revision leaves the stale values
+   in place.
+7. `kit/README.md` and `kit/spec.yaml` gave the `1003h` → `1002h` rewrite without the `1003l`
+   half, which the module docstring explains: the CLI's own `1003l` on exit turns tracking off
+   rather than leaving 1002 on, because the three modes are one setting. Both now say so, and
+   `docs/fragmented-input-sequence.md` says it too.
 
 ## Nits
 
-1. `bin/junie-ide-relayd` is 0644 under a `python3` shebang. Nothing invokes it directly
-   today — the unit spells out `python3 path` — so the failure is latent.
-2. `junie-sbx.sh` pins the provider to `ollama`, which leaves the kit's six credential
-   declarations unreachable from the shipped entry point.
-3. `sbx.example.toml` indents `mounts` by four spaces where the rest of the repo uses two.
-4. The sample unit has no `RestartPreventExitStatus`, so a deliberately refused start
-   retries every two seconds and repeats the same `chmod` advice.
+1. `bin/junie-ide-relayd` was 0644 under a `python3` shebang. Nothing invoked it directly —
+   the unit spells out `python3 path` — so the failure was latent. It is 0755 now, and
+   `./bin/junie-ide-relayd --help` prints its usage rather than `Permission denied`.
+2. `junie-sbx.sh` pinned the provider to `ollama` in the `sbx run` line, with no way to
+   choose another, so the kit's six credential declarations were unreachable from the shipped
+   entry point: whatever key the host exported, the CLI was told to use a local Ollama. The
+   pin is still the default, since that is what this host runs, but `JUNIE_SBX_PROVIDER` and
+   `JUNIE_SBX_MODEL` now override it. `JUNIE_SBX_PROVIDER=` passes no provider at all, which
+   leaves the choice — and so the injected credentials — to the CLI, and the model is pinned
+   only for the default provider, since that model name belongs to Ollama. An empty
+   `JUNIE_SBX_MODEL=` passes no model.
+
+   Verified with a stub `sbx` that prints its arguments: no variable leaves `--provider ollama`
+   and `--model deepseek-v4.1-flash:cloud`; `JUNIE_SBX_PROVIDER=` leaves neither; naming another
+   provider drops the model pin unless a model is named too; and `JUNIE_SBX_MODEL=` leaves the
+   provider and no model.
+3. `sbx.example.toml` indented the `mounts` entries by four spaces where the rest of the repo uses
+   two. The entries are indented by two now, and the file still parses to the same settings.
+4. The sample unit had no `RestartPreventExitStatus`, so a start the daemon deliberately refused
+   — a config file that will not load, or a secret record another local user can reach — was
+   retried every two seconds, repeating the same message and the same `chmod` advice. A setting
+   that has to change cannot be fixed by a restart.
+
+   A refused start now exits `EX_CONFIG` (78), the sysexits status for exactly that, and the
+   sample unit names it in `RestartPreventExitStatus`. A transient failure keeps exiting 1, so a
+   port another process holds is still retried. The daemon's own docstring and the root README say
+   which statuses mean which.
+
+   Verified by running the daemon: a config naming `allow_tools = "nope"` exits 78, an exposed
+   secrets directory exits 78, an exposed record exits 78, and a missing instance directory still
+   exits 1. `tests/test_relayd.py` covers the same four in `ExitStatusTest`, and
+   `systemd-analyze verify --user` accepts the unit.
 5. There were no tests, in a daemon of roughly 1500 lines of parsers with a security
    boundary riding on them. `tests/test_relayd.py` now covers `split_digest_secret`,
    `read_chunked`, `read_message`, `tool_calls`, `allowed_tool`, `refused_tool`,
@@ -340,3 +380,12 @@ into the log.
     version.
 12. ~~The `mounts` entry handling in `junie-sbx.sh`~~ — done; a bare `:ro` is named as the
     marker.
+13. ~~The stale `store-dir` in `~/.npmrc`~~ — done; each key is rewritten on every start.
+14. ~~The missing `1003l` half of the rewrite~~ — done; both docs say the CLI's own reset still
+    turns tracking off.
+15. ~~The daemon's missing execute bit~~ — done; it is 0755, so its shebang resolves.
+16. ~~The hard-pinned provider~~ — done; `JUNIE_SBX_PROVIDER` and `JUNIE_SBX_MODEL` override
+    it, and an empty provider passes none, so the kit's credentials apply.
+17. ~~The four-space indent in `sbx.example.toml`~~ — done; the entries are indented by two.
+18. ~~The unit's missing `RestartPreventExitStatus`~~ — done; a refused start exits 78 and the
+    unit stops retrying it.

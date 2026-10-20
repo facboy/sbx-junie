@@ -94,3 +94,7 @@ mouse movement while press, release and drag reports keep arriving. That is the
 load half of the problem rather than the corruption half: the hovering above cost
 6628 dispatches that found no handler — 6 per report, bursts of 546/s — where no
 mouse event ever matched a handler.
+
+The `ESC[?1003l` the CLI sends on exit is passed through unchanged. The three
+modes being one setting, it turns tracking off altogether rather than leaving
+1002 on.

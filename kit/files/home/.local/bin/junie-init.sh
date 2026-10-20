@@ -58,14 +58,23 @@ fi
 # pnpm reads store and cache locations from .npmrc. Writing them here rather
 # than exporting them keeps one source of truth for the two, and .npmrc is
 # where pnpm looks before it looks anywhere else.
+#
+# Each key is rewritten on every start, not added only when absent: a line an
+# earlier sandbox wrote names an overlay this one may not have mounted, and
+# pnpm would then keep its store and cache where nothing is.
 NPMRC=~/.npmrc
+set_npmrc() {
+	[ -f "${NPMRC}" ] || : > "${NPMRC}"
+	NPMRC_KEY="$1" NPMRC_VALUE="$2" awk '
+		index($0, ENVIRON["NPMRC_KEY"] "=") == 1 { next }
+		{ print }
+		END { print ENVIRON["NPMRC_KEY"] "=" ENVIRON["NPMRC_VALUE"] }
+	' "${NPMRC}" > "${NPMRC}.new" && cat "${NPMRC}.new" > "${NPMRC}"
+	rm -f "${NPMRC}.new"
+}
 if [ -n "${JUNIE_PNPM_STORE:-}" ]; then
-	if ! grep -q '^store-dir=' "${NPMRC}" 2> /dev/null; then
-		echo "store-dir=${JUNIE_PNPM_STORE}" >> "${NPMRC}"
-	fi
+	set_npmrc store-dir "${JUNIE_PNPM_STORE}"
 fi
 if [ -n "${JUNIE_PNPM_CACHE:-}" ]; then
-	if ! grep -q '^cache-dir=' "${NPMRC}" 2> /dev/null; then
-		echo "cache-dir=${JUNIE_PNPM_CACHE}" >> "${NPMRC}"
-	fi
+	set_npmrc cache-dir "${JUNIE_PNPM_CACHE}"
 fi

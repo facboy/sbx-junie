@@ -28,6 +28,12 @@ ExecStart=/usr/bin/env python3 %h/git/sbx-junie/bin/junie-ide-relayd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
+# A refused start is a setting, not a fault: the daemon exits 78 for a config file
+# it cannot load or a secret record reachable beyond its owner, and retrying
+# would repeat the same message and the same `chmod` advice every two seconds
+# until someone acted. A port another process holds keeps exiting 1, which the
+# restart above still handles.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

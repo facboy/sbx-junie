@@ -12,6 +12,6 @@ pnpm = true
 # read-only. A path the host does not have stops the run, so the entries below
 # are commented out: uncomment the ones your host has.
 mounts = [
-    # "~/data",
-    # "/srv/datasets:ro",
+  # "~/data",
+  # "/srv/datasets:ro",
 ]

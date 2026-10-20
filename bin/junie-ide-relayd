@@ -52,7 +52,9 @@ A secret is only a credential while it is the operator's alone, so the daemon
 refuses to start when the records, or the directory holding them, are reachable
 beyond their owner: the fix it names is `chmod 700` and `chmod 600`, which is
 what `junie-sbx.sh` writes. Refusing rather than skipping, since a daemon that
-started anyway would keep a reach its operator believes it denied.
+started anyway would keep a reach its operator believes it denied. Such a
+refusal, and a config file that will not load, exit `EX_CONFIG` (78) rather than
+1, so a supervisor can stop retrying a start only a setting can fix.
 
 The tool allowlist comes from `DEFAULT_ALLOW_TOOLS` unless a TOML config file or
 the flags below name another:
@@ -108,6 +110,12 @@ import tomllib
 DEFAULT_PORT = 27183
 CONFIG_BASENAME = "relayd.toml"
 SECRETS_DIRNAME = "relay-secrets"
+# The status a refused start exits with: a setting the daemon will not run under,
+# which a supervisor must not retry -- the same advice and the same failure would
+# repeat for as long as it did. `EX_CONFIG` from sysexits.h, because that is what
+# this is; the sample unit names it in `RestartPreventExitStatus`. A transient
+# failure, such as a port another process holds, keeps exiting 1.
+EX_CONFIG = 78
 # Records hold the hex `secrets.token_hex(32)` that `junie-sbx.sh` wrote.
 SECRET_HEX_LEN = 64
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
@@ -1486,7 +1494,7 @@ def main(argv):
         # does not load would otherwise leave a list the operator thinks they
         # replaced.
         sys.stderr.write("junie-ide-relayd: bad config %s: %s\n" % (config_path, err))
-        return 1
+        return EX_CONFIG
 
     instances_dir = resolve_instances(args.instances)
     if not os.path.isdir(instances_dir):
@@ -1502,7 +1510,7 @@ def main(argv):
         for path in exposed_paths:
             sys.stderr.write("junie-ide-relayd: %s is reachable beyond its owner: %s\n"
                              % (path, exposed_fix(path)))
-        return 1
+        return EX_CONFIG
     if not read_secrets(secrets_dir):
         sys.stderr.write("junie-ide-relayd: no relay secrets in %s: every relay "
                          "connection is refused until junie-sbx.sh provisions one\n"

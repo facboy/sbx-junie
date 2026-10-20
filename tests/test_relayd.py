@@ -1,6 +1,11 @@
-"""Tests for the relay daemon's parsers and its tool allowlist."""
+"""Tests for the relay daemon's parsers, its tool allowlist and its exit status."""
+import contextlib
+import io
 import json
+import os
+import shutil
 import socket
+import tempfile
 import threading
 import unittest
 
@@ -350,6 +355,50 @@ class ParserTest(unittest.TestCase):
         self.assertFalse(relayd.is_digest(b"0123456789abcdef"))
         self.assertTrue(relayd.is_secret(b"0123456789abcdef" * 4))
         self.assertFalse(relayd.is_secret(b"0123456789abcdef" * 3 + b"g"))
+
+
+class ExitStatusTest(unittest.TestCase):
+    """A refused start is a setting, and exits with a status that says so."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.instances = os.path.join(self.root, "instances")
+        self.secrets = os.path.join(self.root, "relay-secrets")
+        self.config = os.path.join(self.root, "relayd.toml")
+        os.mkdir(self.instances)
+        os.mkdir(self.secrets, 0o700)
+
+    def start(self):
+        """`main`'s status, with its message kept off the test's output.
+
+        The config path is named rather than left to the environment, so the
+        caller's own `relayd.toml` neither changes the answer nor fails to load.
+        """
+        with contextlib.redirect_stderr(io.StringIO()):
+            return relayd.main(["--instances", self.instances,
+                                "--secrets", self.secrets,
+                                "--config", self.config])
+
+    def test_a_config_that_will_not_load_is_a_settings_failure(self):
+        with open(self.config, "w") as handle:
+            handle.write('allow_tools = "nope"\n')
+        self.assertEqual(self.start(), relayd.EX_CONFIG)
+
+    def test_an_exposed_directory_is_a_settings_failure(self):
+        os.chmod(self.secrets, 0o755)
+        self.assertEqual(self.start(), relayd.EX_CONFIG)
+
+    def test_an_exposed_record_is_a_settings_failure(self):
+        record = os.path.join(self.secrets, "project.json")
+        with open(record, "w") as handle:
+            json.dump({"project_path": "/p", "secret": "0" * 64}, handle)
+        os.chmod(record, 0o644)
+        self.assertEqual(self.start(), relayd.EX_CONFIG)
+
+    def test_a_missing_instance_directory_is_not(self):
+        os.rmdir(self.instances)
+        self.assertEqual(self.start(), 1)
 
 
 if __name__ == "__main__":

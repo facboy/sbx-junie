@@ -339,8 +339,29 @@ if [[ "${PNPM_ON}" == 1 ]]; then
 	)
 fi
 
-exec sbx run \
-    --provider "ollama" --model "deepseek-v4.1-flash:cloud" \
+# The provider and model the CLI runs with. `JUNIE_SBX_PROVIDER` and
+# `JUNIE_SBX_MODEL` override them. Naming a provider other than the default
+# drops the model pin with it, since the deepseek model belongs to that default:
+# `JUNIE_SBX_PROVIDER=` leaves the provider to the CLI, which is what makes the
+# kit's credentials -- a `JUNIE_API_KEY` or a key the proxy injects -- the ones
+# used.
+PROVIDER="${JUNIE_SBX_PROVIDER-ollama}"
+if [[ -n "${JUNIE_SBX_MODEL+set}" ]]; then
+	MODEL="${JUNIE_SBX_MODEL}"
+elif [[ "${PROVIDER}" == "ollama" ]]; then
+	MODEL="deepseek-v4.1-flash:cloud"
+else
+	MODEL=""
+fi
+RUN_ARGS=(run)
+if [[ -n "${PROVIDER}" ]]; then
+	RUN_ARGS+=(--provider "${PROVIDER}")
+fi
+if [[ -n "${MODEL}" ]]; then
+	RUN_ARGS+=(--model "${MODEL}")
+fi
+
+exec sbx "${RUN_ARGS[@]}" \
     "${ENVS[@]}" \
     "${SBX_KIT}" \
     "${MOUNTS[@]}"

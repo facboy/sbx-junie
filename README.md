@@ -61,8 +61,11 @@ cd ~/git/some-project
 
 The script assumes this repo is cloned at `~/git/sbx-junie`, and takes the current directory as the
 sandbox's project — its basename names a per-project directory, and the directory itself is the
-writable workspace mount. It pins the provider to `ollama` and the model to
-`deepseek-v4.1-flash:cloud`; edit the script to use another.
+writable workspace mount. It runs the CLI with the provider `ollama` and the model
+`deepseek-v4.1-flash:cloud`, the model being pinned only for that provider.
+`JUNIE_SBX_PROVIDER` and `JUNIE_SBX_MODEL` override either, and `JUNIE_SBX_PROVIDER=` passes no
+provider at all, which is how the kit's credentials — a `JUNIE_API_KEY`, or a BYOK key the proxy
+injects — get used instead of a local Ollama. `JUNIE_SBX_MODEL=` likewise passes no model.
 
 The host paths it passes:
 
@@ -209,7 +212,9 @@ The daemon refuses to start while a record, or the directory holding them, is re
 owner — `chmod 600` on the records and `chmod 700` on the directory, which is what `junie-sbx.sh` and
 `setup-junie-sbx.sh` write. A secret another local user can read is not a credential, and starting
 anyway would keep a reach you believe is denied. Loosening a record while the daemon runs revokes its
-access on the next connection, without a restart.
+access on the next connection, without a restart. A refused start exits 78, as does a config file
+that will not load, so a supervisor can tell a setting it must not retry from a fault; the sample
+unit names 78 in `RestartPreventExitStatus` and leaves `Restart=on-failure` to the rest.
 
 It is a foreground process, so it can be left in a terminal or put under whatever supervisor you
 already use. `systemd/user/junie-ide-relayd.service` is a sample user unit for it: copy that file

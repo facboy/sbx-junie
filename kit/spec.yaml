@@ -152,7 +152,8 @@ setup:
     # report, `13u` from Enter. The filter holds each sequence until it ends and
     # writes it whole, and rewrites `1003h` to `1002h`, so the per-movement
     # reports behind those fragments stop while press, release and drag keep
-    # reporting.
+    # reporting. `1003l` passes through: the three modes are one setting, so it
+    # turns tracking off rather than leaving `1002h` on.
     # The symlink is removed first because `cp` onto it would write through to
     # the read-only host mount and fail.
     - command:
