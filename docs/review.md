@@ -116,6 +116,41 @@ output, a `SIGTERM`ed child reports `-15`, a closed terminal ends the child with
 and whole-sequence delivery are unchanged. The previous revision hangs on the `/dev/null`
 case and returns 0 for `exit 3`.
 
+### 3b. The terminal filter still leaked fragments, and one write could wedge it — fixed
+
+Two faults survived item 3, both reproduced over a real pty with a fake CLI whose reader
+copies the CLI's budgets (50 ms for a sequence's first byte, 10 ms for each byte after).
+
+- The input hold and the output hold shared one deadline, so a motion-report hold that
+  expired released an input prefix that still had time left. Worse, the input hold itself was
+  50 ms — the same budget the CLI has — so any inter-byte gap past that released the prefix
+  and the tail arrived as typed text. `ESC[<35` + `;20;8M` came through as six typed
+  characters at gaps of 90 ms and up; `ESC[` + `13u` lost Enter the same way. A `1003h` split
+  by 90 ms escaped the `1002h` rewrite for the same reason.
+- `write_output` wrote to stdout inline, and stdout was left blocking. A terminal that stopped
+  draining — a suspended emulator, a slow link — therefore stopped the whole loop, input
+  included: a key pressed while a 300 KB frame was unread reached the CLI only once the
+  terminal resumed. A write error on a closed terminal also escaped as a traceback and exit
+  120 instead of ending the session.
+
+A started sequence now waits `HOLD_TIMEOUT` (0.25 s) for its end, which is well past the gaps
+the pty hop produces; a bare `ESC` waits `ESCAPE_TIMEOUT` (0.05 s), since it is the Escape key
+as much as a sequence's start. The motion hold keeps its own deadline. Output is queued and
+drained by a thread of its own, so no terminal write runs on the path that reads input; a full
+queue stops this process reading the side that feeds it, which is the backpressure the child's
+own pty would have given it. A terminal that goes away ends the session: the child is hung up,
+and one that catches `SIGHUP` and stays is ended after `HANGUP_GRACE`, so a live wrapper cannot
+sit on a terminal nothing reads. The tail queued at exit is flushed before the terminal is put
+back — restoring first applied `ONLCR` to it and turned every `\n` into a second `\r`.
+
+Verified over a pty: reports and Enter are rejoined at gaps up to 240 ms and released past
+that rather than wedging; a split `1003h` is rewritten and `1003l` still passes through; a key
+pressed while a 300 KB frame is unread reaches the CLI at once; 400 KB of output arrives byte
+for byte, including through a reader taking 997-byte sips; a closed terminal ends the wrapper
+in 4 s even when the child ignores `SIGHUP`; and the exit statuses (`3`, `5`, `127`, a signal
+death, and the non-tty path) are unchanged. The previous revision fails the gap, the stalled
+terminal and the closed terminal cases.
+
 ## Medium severity
 
 ### 4. `setup-junie-sbx.sh` never checks for bindfs itself — fixed
@@ -375,7 +410,8 @@ into the log.
 8. ~~The watcher pidfile~~ — done; it goes at exit and the recorded pid is confirmed by
    its `--watch` command line.
 9. ~~The endpoint's unused `--secret` flag~~ — done; the environment is the only source.
-10. ~~The 60 ms claim in `docs/fragmented-input-sequence.md`~~ — done; it says 50 ms.
+10. ~~The 60 ms claim in `docs/fragmented-input-sequence.md`~~ — done; it says the two holds
+    and their budgets.
 11. ~~The stale Playwright version in the README's build-arg example~~ — done; it names no
     version.
 12. ~~The `mounts` entry handling in `junie-sbx.sh`~~ — done; a bare `:ro` is named as the
@@ -389,3 +425,6 @@ into the log.
 17. ~~The four-space indent in `sbx.example.toml`~~ — done; the entries are indented by two.
 18. ~~The unit's missing `RestartPreventExitStatus`~~ — done; a refused start exits 78 and the
     unit stops retrying it.
+19. ~~The filter's shared deadline and its blocking output write~~ — done; the holds have
+    separate budgets, and the terminal is fed by a thread so a stalled one cannot wedge
+    input.

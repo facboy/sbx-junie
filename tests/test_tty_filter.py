@@ -74,6 +74,24 @@ class CharacterLengthTest(unittest.TestCase):
         self.assertEqual(tty_filter.character_length(b"\x80a", 0), 1)
 
 
+class HoldTimeoutTest(unittest.TestCase):
+    def test_a_bare_escape_waits_only_the_first_byte_budget(self):
+        # It is the Escape key as much as the start of a sequence.
+        self.assertEqual(tty_filter.hold_timeout(ESC), tty_filter.ESCAPE_TIMEOUT)
+
+    def test_a_started_sequence_waits_the_full_hold(self):
+        for partial in (ESC + b"[", ESC + b"[<35", ESC + b"O", ESC + b"]0;title"):
+            self.assertEqual(tty_filter.hold_timeout(partial),
+                             tty_filter.HOLD_TIMEOUT)
+
+    def test_the_hold_outlasts_the_cli_budget_that_caused_the_fragments(self):
+        # The CLI reads a sequence with a 10 ms per-byte budget, so a hold that
+        # is shorter than the gaps a pty hop produces releases a prefix whose tail
+        # then arrives as typed text.
+        self.assertGreater(tty_filter.HOLD_TIMEOUT, 0.05)
+        self.assertLessEqual(tty_filter.HOLD_TIMEOUT, 1.0)
+
+
 class PartialMotionSequenceTest(unittest.TestCase):
     def test_a_prefix_of_the_rewritten_sequence_is_held(self):
         on = tty_filter.ALL_MOTION_ON

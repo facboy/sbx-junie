@@ -239,15 +239,19 @@ The last startup hook installs a wrapper over `~/.local/bin/junie` that runs the
 own and hands it whole input sequences only. The CLI reads a sequence with a 10 ms per-byte budget,
 so one the PTY splits leaves its tail inserted into the prompt as typed text — `;20;8M` from a hover
 report, `13u` from Enter, since the kitty keyboard protocol encodes every key as a sequence. The
-wrapper holds each sequence until it ends and writes it in one piece, and rewrites `ESC[?1003h` to
-`ESC[?1002h`. The terminal treats tracking modes 1000, 1002 and 1003 as one setting, so that drops
-the report per mouse movement — the stream behind most of those fragments, and 6628 dispatches that
-found no handler in 14 minutes of hovering — while press, release and drag reports keep arriving.
+wrapper holds each sequence until it ends and writes it in one piece — a started sequence waits
+250 ms, a bare Escape only 50 ms — and rewrites `ESC[?1003h` to `ESC[?1002h`. The terminal treats
+tracking modes 1000, 1002 and 1003 as one setting, so that drops the report per mouse movement —
+the stream behind most of those fragments, and 6628 dispatches that found no handler in 14 minutes
+of hovering — while press, release and drag reports keep arriving.
 The `ESC[?1003l` the CLI sends on exit passes through unchanged, and so turns tracking off
 altogether rather than leaving 1002 on.
 With no terminal on stdin the wrapper skips the PTY and execs the CLI, since nothing can fragment
 its input there and a PTY whose stdin has ended cannot be closed. The CLI's exit status passes
 through in both paths, and a signalled CLI kills the wrapper with the same signal.
+Output for the terminal is queued and written by a thread of its own, so a terminal that stops
+draining cannot stop keystrokes reaching the CLI; a terminal that goes away ends the session
+instead of leaving the wrapper waiting on it.
 `docs/fragmented-input-sequence.md` has the trace. Removing that hook, and
 `files/home/.local/bin/junie-tty-filter.{sh,py}`, restores the plain CLI.
 

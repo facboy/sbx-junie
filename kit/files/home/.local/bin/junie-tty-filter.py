@@ -9,11 +9,19 @@ is inserted as typed text. Seen here as `;20;8M` from a hover report, and as
 sequence of its own.
 
 So a byte the terminal sends is held until the sequence it belongs to ends, and
-the sequence is then written to the CLI in one piece. A hold that sees nothing
-more for a moment is released as it stands, which is what a lone Escape needs.
+the sequence is then written to the CLI in one piece. A sequence that has started
+waits `HOLD_TIMEOUT` for its end and is then released as it stands; a bare Escape,
+which is as likely to be the Escape key as the start of a sequence, waits only
+`ESCAPE_TIMEOUT`, the CLI's own first-byte budget.
 
 The outer terminal is put in raw mode rather than only partly: `ICRNL` would turn
 Enter's CR into a NL, and `IXON` would eat Ctrl-S and Ctrl-Q.
+
+Both directions are queued, and the terminal's queue is drained by a thread of its
+own: a write to a terminal that is not draining waits, and a wait on the path that
+reads input is what wedged the session. A terminal that goes away ends the session
+-- the child is hung up, and one that catches the signal and stays is ended after
+`HANGUP_GRACE` -- rather than leaving this process on a terminal nothing reads.
 
 One output sequence is rewritten: `ESC[?1003h` becomes `ESC[?1002h`, and nothing
 else is touched. Mouse tracking modes 1000, 1002 and 1003 are one mutually
@@ -34,6 +42,7 @@ The child's exit status is this process's: a signalled CLI kills the wrapper wit
 the same signal, so a caller sees the failure it would have seen without the
 wrapper.
 """
+import collections
 import fcntl
 import os
 import pty
@@ -42,14 +51,36 @@ import signal
 import struct
 import sys
 import termios
+import threading
 import time
 import tty
 
 ALL_MOTION_ON = b"\x1b[?1003h"
 DRAG_REPORTING_ON = b"\x1b[?1002h"
 
-# How long a partial sequence waits for its final byte before it is passed on.
-HOLD_TIMEOUT = 0.05
+# How long a sequence that has started waits for the byte that ends it. A released
+# prefix is worse than a late sequence -- the tail then arrives as typed text -- so
+# this is set well past the gaps the pty hop produces.
+HOLD_TIMEOUT = 0.25
+
+# A bare Escape is the Escape key as much as the start of a sequence, so it waits
+# no longer than the CLI's own 50 ms budget for a sequence's first byte.
+ESCAPE_TIMEOUT = 0.05
+
+# How long the terminal may take to accept what is queued for it once the child
+# has gone. A terminal that will not drain at all loses the tail rather than
+# holding the wrapper open after the CLI has exited.
+FINAL_FLUSH_TIMEOUT = 1.0
+
+# How long a child gets to leave once the terminal it was started from has gone.
+# A TUI that handles SIGHUP itself would otherwise keep this process, and the
+# terminal slot it holds, alive for as long as it likes.
+HANGUP_GRACE = 2.0
+
+# How much either side may have waiting before this process stops reading the side
+# that feeds it. A terminal that never drains otherwise costs memory without bound
+# instead of costing the child the backpressure its own pty would have given it.
+QUEUE_LIMIT = 1 << 20
 
 PARAMETER_BYTES = range(0x20, 0x40)
 FINAL_BYTES = range(0x40, 0x7F)
@@ -133,6 +164,11 @@ def split_sequences(data):
         index = stop
         end = stop
     return data[:end], data[end:]
+
+
+def hold_timeout(data):
+    """How long the partial sequence `data` waits for the byte that ends it."""
+    return ESCAPE_TIMEOUT if data == b"\x1b" else HOLD_TIMEOUT
 
 
 def partial_motion_sequence(data):
@@ -229,36 +265,116 @@ def main(argv):
     signal.signal(signal.SIGTERM, on_terminate)
     signal.signal(signal.SIGHUP, on_terminate)
 
-    out = sys.stdout.buffer
+    out = sys.stdout.fileno()
+    # Both directions are queued rather than written where they are read, and the
+    # terminal's queue is drained by a thread of its own. A write to a terminal
+    # that is not draining waits, and doing that wait on the path that reads input
+    # is what wedged the session: keystrokes stopped reaching the CLI until the
+    # terminal caught up.
     to_child = b""
-    partial = b""
-    held_output = b""
-    # When bytes were last added to a hold of either kind. The deadline is
+    to_terminal = collections.deque()
+    queued_bytes = 0
+    terminal_open = True
+    output_ready = threading.Condition()
+
+    def write_terminal():
+        """Hand the queue to the terminal in order, until the terminal is gone."""
+        nonlocal queued_bytes, terminal_open
+        while True:
+            with output_ready:
+                while not to_terminal and terminal_open:
+                    output_ready.wait()
+                if not to_terminal:
+                    return
+                data = to_terminal.popleft()
+            try:
+                view = memoryview(data)
+                while view:
+                    handed = os.write(out, view)
+                    if not handed:
+                        break
+                    view = view[handed:]
+            except OSError:
+                # The terminal is gone, so nothing queued for it can be delivered;
+                # its own side of stdin will report the same thing. Dropping the
+                # queue ends the session as it would have without the wrapper.
+                with output_ready:
+                    to_terminal.clear()
+                    queued_bytes = 0
+                    terminal_open = False
+                    output_ready.notify_all()
+                return
+            with output_ready:
+                queued_bytes -= len(data)
+                output_ready.notify_all()
+
+    writer = threading.Thread(target=write_terminal, daemon=True)
+    writer.start()
+
+    # A partial input sequence, and when its last byte arrived. A hold is
     # measured from that rather than from the loop's cadence: a child writing
     # continuously keeps the loop busy, and a hold would then never expire.
+    partial = b""
+    partial_since = None
+    # Output held for the motion rewrite, with its own deadline. One deadline for
+    # both holds was wrong: a motion hold expiring released an input prefix that
+    # still had time left, whose tail then arrived as typed text.
+    held_output = b""
     held_since = None
+    # When the terminal this process reads went away, if it has.
+    hung_up_at = None
 
-    def write_output(data, last=False):
-        nonlocal held_output, held_since
+    def queue_output(data, last=False):
+        """Add `data` to what the terminal is owed, motion rewriting included."""
+        nonlocal held_output, held_since, queued_bytes
         data = held_output + data
         held_output = b"" if last else partial_motion_sequence(data)
         if held_output:
             data = data[:-len(held_output)]
             held_since = time.monotonic()
         if data:
-            out.write(data.replace(ALL_MOTION_ON, DRAG_REPORTING_ON))
-            out.flush()
+            data = data.replace(ALL_MOTION_ON, DRAG_REPORTING_ON)
+            with output_ready:
+                to_terminal.append(data)
+                queued_bytes += len(data)
+                output_ready.notify_all()
 
-    def flush_held_output():
-        nonlocal held_output, held_since
+    def release_held_output():
+        nonlocal held_output, held_since, queued_bytes
         if held_output:
-            out.write(held_output)
-            out.flush()
+            with output_ready:
+                to_terminal.append(held_output)
+                queued_bytes += len(held_output)
+                output_ready.notify_all()
             held_output = b""
         held_since = None
 
-    def reap():
-        """The child's exit status, waiting for it if it has not exited yet."""
+    def reap(terminate=False):
+        """The child's exit status, waiting for it if it has not exited yet.
+
+        `terminate` is for when the terminal this process reads is already gone:
+        there is no session left for the child to serve, so one that caught
+        SIGHUP and stayed is ended rather than left to hold this process, and the
+        terminal slot it occupies, for as long as it likes.
+        """
+        if terminate:
+            deadline = time.monotonic() + HANGUP_GRACE
+            while time.monotonic() < deadline:
+                done, code = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    return os.waitstatus_to_exitcode(code)
+                time.sleep(0.01)
+            for signum in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(pid, signum)
+                except OSError:
+                    pass
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    done, code = os.waitpid(pid, os.WNOHANG)
+                    if done:
+                        return os.waitstatus_to_exitcode(code)
+                    time.sleep(0.01)
         _, code = os.waitpid(pid, 0)
         return os.waitstatus_to_exitcode(code)
 
@@ -271,20 +387,42 @@ def main(argv):
                 break
             if not data:
                 break
-            write_output(data)
-        write_output(b"", last=True)
+            queue_output(data)
+        queue_output(b"", last=True)
 
     status = 0
     reaped = False
     stdin_open = True
     try:
         while True:
-            readable = [master] + ([stdin_fd] if stdin_open else [])
+            readable = []
+            # The side that feeds a full queue is left unread: that is the
+            # backpressure its own pty would have given it, and it is what keeps a
+            # terminal that never drains from costing memory without bound.
+            if queued_bytes < QUEUE_LIMIT:
+                readable.append(master)
+            if stdin_open and len(to_child) < QUEUE_LIMIT:
+                readable.append(stdin_fd)
             writable = [master] if to_child else []
-            if (partial or held_output) and held_since is not None:
-                timeout = max(0.0, HOLD_TIMEOUT - (time.monotonic() - held_since))
-            else:
-                timeout = None
+
+            deadlines = []
+            if partial and partial_since is not None:
+                deadlines.append(partial_since + hold_timeout(partial))
+            if held_output and held_since is not None:
+                deadlines.append(held_since + HOLD_TIMEOUT)
+            if hung_up_at is not None:
+                deadlines.append(hung_up_at + HANGUP_GRACE)
+            if not readable:
+                # Nothing is read this pass, so the wait has to stay bounded for
+                # the child to be reaped and the hangup to expire.
+                deadlines.append(time.monotonic() + HOLD_TIMEOUT)
+            if to_child:
+                # Input the child has not taken yet can leave both descriptors
+                # untriggered, and the wait would then have no deadline at all.
+                deadlines.append(time.monotonic() + HOLD_TIMEOUT)
+            timeout = None
+            if deadlines:
+                timeout = max(0.0, min(deadlines) - time.monotonic())
             ready, sendable, _ = select.select(readable, writable, [], timeout)
 
             if stdin_fd in ready:
@@ -295,28 +433,32 @@ def main(argv):
                 if data:
                     whole, partial = split_sequences(partial + data)
                     to_child += whole
-                    if partial:
-                        held_since = time.monotonic()
+                    partial_since = time.monotonic() if partial else None
                 else:
                     # The terminal this process reads is gone. The CLI sits on a
                     # pty of its own, where a `^D` byte is not an EOF once the pty
                     # is raw -- it would arrive as typed input instead. A hangup
                     # is what the child's own terminal would have raised, so that
-                    # is what it is sent.
+                    # is what it is sent, and the grace below ends the session if
+                    # it does not take it.
                     stdin_open = False
+                    hung_up_at = time.monotonic()
                     try:
                         os.killpg(pid, signal.SIGHUP)
                     except OSError:
                         pass
 
-            if ((partial or held_output) and held_since is not None
-                    and time.monotonic() - held_since >= HOLD_TIMEOUT):
-                # The rest of the sequence is not coming: pass on what arrived
-                # rather than let the CLI's own budget decide.
-                if partial:
+            if partial and partial_since is not None:
+                if time.monotonic() - partial_since >= hold_timeout(partial):
+                    # The rest of the sequence is not coming: pass on what arrived
+                    # rather than let the CLI's own budget decide.
                     to_child += partial
                     partial = b""
-                flush_held_output()
+                    partial_since = None
+
+            if held_output and held_since is not None:
+                if time.monotonic() - held_since >= HOLD_TIMEOUT:
+                    release_held_output()
 
             if sendable:
                 try:
@@ -326,6 +468,16 @@ def main(argv):
                 except OSError:
                     break
                 to_child = to_child[written:]
+
+            if not terminal_open and hung_up_at is None:
+                # The writer found the terminal gone before stdin reported it.
+                # The session is over either way, so the child is hung up the same
+                # way and the grace below bounds its exit.
+                hung_up_at = time.monotonic()
+                try:
+                    os.killpg(pid, signal.SIGHUP)
+                except OSError:
+                    pass
 
             if master in ready:
                 try:
@@ -339,14 +491,36 @@ def main(argv):
                     # is only known once it is reaped, so the loop ends here and
                     # the wait below collects it.
                     break
-                write_output(data)
+                queue_output(data)
+
+            if hung_up_at is not None and time.monotonic() - hung_up_at >= HANGUP_GRACE:
+                # A child that caught SIGHUP and stayed would keep this process,
+                # and the terminal slot it holds, alive for as long as it liked.
+                break
 
             done, code = os.waitpid(pid, os.WNOHANG)
             if done:
                 reaped = True
                 status = os.waitstatus_to_exitcode(code)
-                drain_child_output()
                 break
+        if not reaped:
+            # The pty ended before the child was seen exiting: without this the
+            # wrapper would report success for a CLI that failed or was signalled.
+            status = reap(terminate=hung_up_at is not None)
+        drain_child_output()
+        release_held_output()
+        # The child has gone, so there is nothing left to decide: what it wrote
+        # goes to the terminal whole. This is before the terminal is put back,
+        # while it is still raw: restoring first would apply ONLCR to the tail and
+        # turn each `\n` in it into a second `\r`. The budget is there because a
+        # terminal that is not draining must not hold the wrapper open.
+        deadline = time.monotonic() + FINAL_FLUSH_TIMEOUT
+        with output_ready:
+            while queued_bytes and terminal_open:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                output_ready.wait(remaining)
     finally:
         if saved is not None:
             try:
@@ -354,10 +528,6 @@ def main(argv):
             except (OSError, termios.error):
                 pass
         os.close(master)
-    if not reaped:
-        # The pty ended before the child was seen exiting: without this the
-        # wrapper would report success for a CLI that failed or was signalled.
-        status = reap()
     if status < 0:
         # The child did not exit but was killed, and the terminal is already
         # restored: this process takes the same signal, so its caller sees a

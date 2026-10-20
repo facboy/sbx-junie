@@ -83,10 +83,11 @@ input path rather than the renderer.
 
 `junie-tty-filter.py` runs the CLI on a PTY of its own, holds every byte the
 terminal sends until the input sequence it belongs to ends, and writes the
-sequence to the CLI in one piece. That closes the corruption: pieces up to 50 ms
-apart are rejoined (`HOLD_TIMEOUT` is 0.05 s), against the CLI's own 10 ms budget.
-A longer gap releases the pieces separately, since a hold that waits past the
-timeout is a sequence that is not coming rather than a slow one.
+sequence to the CLI in one piece. That closes the corruption: a started sequence
+waits 250 ms for its end (`HOLD_TIMEOUT` is 0.25 s), well past the gaps the pty
+hop produces, against the CLI's own 10 ms budget. A bare `ESC` waits only 50 ms
+(`ESCAPE_TIMEOUT`), because it is the Escape key as much as the start of a
+sequence. A hold that runs out releases what arrived as it stands.
 
 It also rewrites `ESC[?1003h` to `ESC[?1002h`. Reporting modes 1000, 1002 and 1003
 are one mutually exclusive setting in the terminal, so this drops the report per
