@@ -25,11 +25,6 @@ if ! mount -t fuse.bindfs | fgrep -q "${JUNIE_RO}/_junie"; then
   fi
 fi
 
-mkdir -p "${JUNIE_RO}/_local/bin"
-if [[ ! -L "${JUNIE_RO}/_local/bin/junie" ]]; then
-  ln -s ~/.local/bin/junie "${JUNIE_RO}/_local/bin/"
-fi
-
 mkdir -p "${CONFIG_HOME}/sbx-state"
 
 # The per-project relay secrets `junie-sbx.sh` writes and the host relay daemon

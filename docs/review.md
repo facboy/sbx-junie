@@ -454,7 +454,7 @@ is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 6, and four of the low-severity
+The relay's newer code is where the faults are. Items 1 to 6, and five of the low-severity
 points, are fixed; the rest stand.
 
 ### High severity
@@ -637,6 +637,8 @@ directory. The previous revision creates the literal `~` tree there instead.
 5. `setup-junie-sbx.sh` still creates `${JUNIE_RO}/_local/bin/junie`, left from `2d0b53f`.
    Nothing mounts `junie_ro/_local`; `junie-sbx.sh` mounts `~/.local/bin` itself. Dead step,
    and the `ln -s` aborts the script under `set -e` if that path is ever a real directory.
+   — fixed: the step is gone, and a run against a tree where that path is a real directory
+   now finishes where the previous revision stopped with `ln: Already exists`.
 6. `PROJ_DIR` is keyed on `basename $PWD` while the secret is keyed on the full path, so two
    checkouts whose directories share a name share one `_junie` home and both overlay trees —
    their sessions and caches mix — while their secrets stay distinct.
