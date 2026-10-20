@@ -111,11 +111,6 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, required=True, help="loopback port to listen on")
     parser.add_argument("--digest", required=True, help="md5 of the project path this endpoint serves")
-    parser.add_argument("--secret", default=os.environ.get("JUNIE_IDE_RELAY_SECRET", ""),
-                        help="the secret this sandbox's project was provisioned with; "
-                             "the daemon splices only a preamble that carries it. Read "
-                             "from $JUNIE_IDE_RELAY_SECRET so it stays out of the "
-                             "process list")
     parser.add_argument("--mcp", action="store_true",
                         help="serve the IDE's built-in MCP server rather than its RPC")
     parser.add_argument("--host", required=True, help="host the relay daemon runs on")
@@ -126,7 +121,10 @@ def main(argv):
                              "whose port was already taken")
     args = parser.parse_args(argv)
 
-    if not args.secret:
+    # Read from the environment rather than a flag, so the secret stays out of the
+    # process list that `is_our_endpoint` and any local process can read.
+    secret = os.environ.get("JUNIE_IDE_RELAY_SECRET", "")
+    if not secret:
         sys.stderr.write("junie-ide-relay-endpoint: JUNIE_IDE_RELAY_SECRET is empty, "
                          "so the daemon would refuse every preamble\n")
         return 1
@@ -140,7 +138,7 @@ def main(argv):
     with open(args.record, "w") as record:
         record.write("%d %d\n" % (args.port, os.getpid()))
 
-    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % (args.digest, args.secret)
+    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % (args.digest, secret)
     while True:
         try:
             readable, _, _ = select.select(listeners, [], [])

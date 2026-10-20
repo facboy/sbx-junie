@@ -259,8 +259,12 @@ into the log.
    a live process that is not a watcher now starts a watcher (before: refused to start),
    `SIGTERM` leaves no pidfile (before: left one), and a second start still finds the
    first and exits. Both `dash` and `bash`, and the pass still runs once per interval.
-2. `--secret` on the endpoint defaults to `$JUNIE_IDE_RELAY_SECRET` and nothing else, since
-   the launcher never passes the flag. It is dead weight as it stands.
+2. `--secret` on the endpoint defaulted to `$JUNIE_IDE_RELAY_SECRET` and nothing else,
+   since the launcher never passes the flag; it was dead weight as it stood. Removed, and
+   the environment read moved out of the argument default into the body, which is what the
+   preamble already used it for. A secret on a command line is readable by any local
+   process through `/proc`, which `is_our_endpoint` itself relies on, so the flag was also
+   a trap for whoever wired it up next.
 3. `docs/fragmented-input-sequence.md` says pieces up to 60 ms apart are rejoined;
    `HOLD_TIMEOUT` is 0.05 s.
 4. `kit/Dockerfile` pins Playwright 1.63.0, while `kit/README.md` gives advice anchored to
@@ -309,3 +313,4 @@ into the log.
    in `tests/`. Then the version and doc drift.
 8. ~~The watcher pidfile~~ — done; it goes at exit and the recorded pid is confirmed by
    its `--watch` command line.
+9. ~~The endpoint's unused `--secret` flag~~ — done; the environment is the only source.
