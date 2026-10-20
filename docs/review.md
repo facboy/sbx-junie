@@ -447,14 +447,15 @@ into the log. The second pass reproduced it in both copies of `splice` and fixed
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
 file was read again, and `bash -n` and `dash -n` are clean. Items 1 to 4 were fixed after that
-read, so `python3 -m unittest discover -s tests` now runs 62 cases. The shell-side fixes behave as
+read, so `python3 -m unittest discover -s tests` now runs 65 cases. The shell-side fixes behave as
 the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
 non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 4 are fixed; the rest stand.
+The relay's newer code is where the faults are. Items 1 to 6 are fixed; the low-severity
+points stand.
 
 ### High severity
 
@@ -585,22 +586,31 @@ far end is closed ends the splice with nothing raised and the thread gone, and a
 only half-closes still receives its reply. `tests/test_splice.py` runs all three over the
 daemon's copy and the endpoint's; both fail on the previous revision with `BrokenPipeError`.
 
-#### 5. The endpoint needs IPv6 to start at all
+#### 5. The endpoint needs IPv6 to start at all — fixed
 
-`junie-ide-relay-endpoint.py: bind` constructs the IPv6 socket inside the loop but outside
-the `try`, so a kernel without IPv6 (`EAFNOSUPPORT`, which a disabled module gives) aborts
-the endpoint after the IPv4 listener has bound — against the docstring's "a partial bind
+`junie-ide-relay-endpoint.py: bind` constructed the IPv6 socket inside the loop but outside
+the `try`, so a kernel without IPv6 (`EAFNOSUPPORT`, which a disabled module gives) aborted
+the endpoint after the IPv4 listener had bound — against the docstring's "a partial bind
 still serves, and only having neither is fatal". Reproduced by stubbing `socket.socket`.
-Constructing it inside the `try` is the whole fix.
 
-#### 6. `junie-init.sh` assumes `$HOME`
+The construction is inside the `try` now, and a family that cannot be created is recorded
+the same way as one that cannot be bound: the loop moves on, and only having neither is
+fatal. `tests/test_endpoint.py` covers a kernel with both families, one that refuses IPv6,
+and one that refuses both; the previous revision raises out of `bind` in the middle case.
+
+#### 6. `junie-init.sh` assumes `$HOME` — fixed
 
 The spec runs it through `sh`, and `junie-ide-relay.sh` opens by saying the startup
-environment has no `$HOME` and defends itself accordingly. `junie-init.sh` uses `~` in every
+environment has no `$HOME` and defends itself accordingly. `junie-init.sh` used `~` in every
 path. Under `dash` with `HOME` unset, `mkdir -p ~/.local/share` created a literal `~`
-directory in the working directory and every link landed inside it (reproduced), which
-leaves the `~/.local/bin/junie` entrypoint pointing at nothing. This runtime supplies
-`$HOME`, so the links under `/home/agent` are correct; the guard is what keeps it so.
+directory in the working directory and every link landed inside it (reproduced), which left
+the `~/.local/bin/junie` entrypoint pointing at nothing. This runtime supplies `$HOME`, so
+the links under `/home/agent` were correct; the guard is what keeps it so.
+
+Every path is now built from `home="${HOME:-/home/agent}"`, `/home/agent` being the user the
+spec runs the hook as. Verified under `dash` with `HOME` unset against a fixture home: every
+link and the `.npmrc` land under the fallback, and nothing is created in the working
+directory. The previous revision creates the literal `~` tree there instead.
 
 ### Low severity
 
@@ -651,6 +661,7 @@ payload the list is drawn against.
 3. ~~A reply the filter cannot read~~ — done; `Accept-Encoding` is dropped on the way out,
    `is_bounded` reads a declared length first, and an unreadable reply ends the session.
 4. ~~The `splice` write error~~ — done, in both copies; `tests/test_splice.py` covers them.
-5. The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`.
+5. ~~The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`~~ — done; `tests/test_endpoint.py`
+   covers the bind.
 6. The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
    caps.

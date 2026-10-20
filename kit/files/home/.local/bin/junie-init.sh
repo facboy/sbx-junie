@@ -1,18 +1,24 @@
 #!/bin/sh
 
-mkdir -p ~/.local/share/
-/usr/bin/ln -s "${USER_HOME}/.local/share/junie" ~/.local/share/
+# The home every link below lands in. `sh` expands `~` from `$HOME`, and a
+# startup command can run without one: the links would then be made in a literal
+# `~` directory in the working directory, where the entrypoint never looks. The
+# sandbox's user is this one either way, so its home is the fallback.
+home="${HOME:-/home/agent}"
 
-mkdir -p ~/.local/bin/
-/usr/bin/ln -sf "${USER_HOME}/.local/bin/junie" ~/.local/bin/
+mkdir -p "${home}/.local/share/"
+/usr/bin/ln -s "${USER_HOME}/.local/share/junie" "${home}/.local/share/"
+
+mkdir -p "${home}/.local/bin/"
+/usr/bin/ln -sf "${USER_HOME}/.local/bin/junie" "${home}/.local/bin/"
 
 # Junie's instances do not follow JUNIE_HOME -- the CLI resolves them from
 # user.home/.junie/instances -- so ~/.junie is a real directory the relay fills,
 # and the read-only view is linked beside them rather than that directory moved.
 if [ -n "${JUNIE_HOME:-}" ]; then
-	mkdir -p ~/.junie
+	mkdir -p "${home}/.junie"
 	for name in AGENTS.md docs tools; do
-		/usr/bin/ln -sfn "${JUNIE_HOME}/${name}" ~/.junie/
+		/usr/bin/ln -sfn "${JUNIE_HOME}/${name}" "${home}/.junie/"
 	done
 fi
 
@@ -24,7 +30,7 @@ fi
 link_bin() {
 	[ -x "$1" ] || return 0
 	"$1" --version > /dev/null 2>&1 || return 0
-	/usr/bin/ln -sf "$1" ~/.local/bin/
+	/usr/bin/ln -sf "$1" "${home}/.local/bin/"
 }
 
 # node goes first: the node-hosted tools below are scripts whose shebang
@@ -62,7 +68,7 @@ fi
 # Each key is rewritten on every start, not added only when absent: a line an
 # earlier sandbox wrote names an overlay this one may not have mounted, and
 # pnpm would then keep its store and cache where nothing is.
-NPMRC=~/.npmrc
+NPMRC="${home}/.npmrc"
 set_npmrc() {
 	[ -f "${NPMRC}" ] || : > "${NPMRC}"
 	NPMRC_KEY="$1" NPMRC_VALUE="$2" awk '

@@ -217,7 +217,8 @@ Junie in it. The engine is the sandbox's own, inside its VM — a sandbox has no
 daemon — and the derived image keeps the base's `com.docker.sandboxes.start-docker=true`, which is
 what asks the runtime to start it. The CLI comes from the host instead — the root scripts mount
 `~/.local/bin` and `~/.local/share/junie` read-only, and `junie-init.sh` symlinks them into
-`/home/agent` at startup so the `junie` entrypoint resolves.
+`/home/agent` at startup so the `junie` entrypoint resolves. It takes that home from `$HOME`
+and falls back to `/home/agent`, since a startup hook can run without one.
 
 [`../build-image.sh`](../build-image.sh) is the build, tagged with the name this spec's
 `sandbox.image` gives: an image under another tag is one the sandbox never boots.

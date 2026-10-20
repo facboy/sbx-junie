@@ -95,13 +95,19 @@ def bind(port):
     The CLI builds the built-in MCP server's URL as `http://localhost:<port>`,
     which resolves to ::1 first, so a listener on IPv4 alone would answer every
     connection only after a refused IPv6 attempt. Either family may be taken --
-    a host without IPv6, or a sandbox with something already on that port -- so
-    a partial bind still serves, and only having neither is fatal.
+    a kernel with no IPv6, a host without it, or a sandbox with something already
+    on that port -- so a partial bind still serves, and only having neither is
+    fatal. A family the kernel cannot even create is the same case as one it
+    refuses to bind.
     """
     listeners = []
     failure = None
     for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
-        listener = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            listener = socket.socket(family, socket.SOCK_STREAM)
+        except OSError as err:
+            failure = failure or err
+            continue
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             listener.bind((address, port))
