@@ -402,7 +402,7 @@ into the log. The second pass reproduced it in both copies of `splice` and fixed
    unparseable and dispatcher-targeted calls, the stream's terminator and the reply
    after it, and a refusal while the stream is open. `tests/test_tty_filter.py` covers
    `split_sequences`, `character_length` and `partial_motion_sequence`.
-   `python3 -m unittest discover -s tests` runs both, and ten of the cases fail against
+   `python3 -B -m unittest discover -s tests` runs both, and ten of the cases fail against
    the revision that had the allowlist holes.
 
 ## Priority (first pass)
@@ -446,16 +446,16 @@ into the log. The second pass reproduced it in both copies of `splice` and fixed
 ## Second review
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
-file was read again, and `bash -n` and `dash -n` are clean. Items 1 to 4 were fixed after that
-read, so `python3 -m unittest discover -s tests` now runs 71 cases. The shell-side fixes behave as
-the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
-non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
+file was read again, and `bash -n` and `dash -n` are clean. The items were fixed after that
+read, so `python3 -B -m unittest discover -s tests` now runs 71 cases. The shell-side fixes
+behave as the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init
+is non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 to 6, and six of the low-severity
-points, are fixed; the rest stand.
+The relay's newer code is where the faults are. Items 1 to 6, and the seven low-severity
+points, are fixed.
 
 ### High severity
 
@@ -651,7 +651,9 @@ directory. The previous revision creates the literal `~` tree there instead.
    directory should do.
 7. `tests/scripts.py` sets `dont_write_bytecode` at import, which is too late for itself and
    `tests/__init__.py`, so a run leaves `tests/__pycache__/` behind. Gitignored, and the
-   docstring's claim is about the kit file alone.
+   docstring's claim is about the kit file alone. — fixed: the command is `python3 -B -m
+   unittest discover -s tests`, which leaves neither `tests/__pycache__` nor bytecode beside
+   the kit scripts, and the docstrings say why the flag is there.
 
 ### What holds
 

@@ -1,8 +1,11 @@
 """The repository's scripts, loaded as modules.
 
 None of the three scripts is importable by name: the daemon has no `.py` suffix, and
-the endpoint and the filter are shipped as files the image copies into place. Loading
-them writes no bytecode, so a test run leaves nothing beside a file the image carries.
+the endpoint and the filter are shipped as files the image copies into place. The flag
+below keeps loading them from writing bytecode beside them, which would land in
+`kit/files/home/.local/bin/` -- a tree the image copies wholesale into the sandbox. It
+is set too late to keep bytecode out of `tests/` itself, which is why the test command
+runs Python with `-B`.
 """
 import importlib.machinery
 import importlib.util

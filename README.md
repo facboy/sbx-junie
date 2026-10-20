@@ -327,12 +327,16 @@ The sandbox's watcher picks the work up within a tick, without restarting the sa
 
 ## Tests
 
-The daemon's parsers and allowlist, the byte splice both relay halves carry, and the terminal
-filter's splitting are covered by `tests/`, which needs nothing beyond `python3`:
+The daemon's parsers and allowlist, the byte splice both relay halves carry, the endpoint's
+bind, and the terminal filter's splitting are covered by `tests/`, which needs nothing beyond
+`python3`:
 
 ```console
-python3 -m unittest discover -s tests
+python3 -B -m unittest discover -s tests
 ```
+
+`-B` keeps the run from writing `tests/__pycache__`; the suite loads the kit's scripts as
+files, and bytecode beside them would land in the tree the image copies into the sandbox.
 
 The MCP cases drive `splice_mcp` over socket pairs with a fake IDE, so a withheld call is
 shown never to reach it, and the splice cases run the same scenarios over the daemon's copy
