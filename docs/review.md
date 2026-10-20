@@ -1,10 +1,13 @@
 # Code review
 
-Review of the repository at `682e0a9` (the `sbx-kits-contrib` submodule is upstream and was
-not reviewed): every tracked file in the repo proper was read, and the pieces that run
-outside a sandbox were exercised — the relay's parsers against socket pairs, the tty
-filter against a real pty, the relay script against a stub daemon, and the config reader
-against sample `.junie/sbx.toml` files.
+Two passes. The first read the repository at `682e0a9`; the second, under
+[Second review](#second-review), read it again at `bcf1005`, sixteen commits later. The
+`sbx-kits-contrib` submodule is upstream and was not reviewed in either.
+
+Both passes read every tracked file in the repo proper and exercised the pieces that run
+outside a sandbox: the relay's parsers against socket pairs, the tty filter against a real
+pty, the relay script against a stub daemon, and the config reader against sample
+`.junie/sbx.toml` files.
 
 ## What the repo is
 
@@ -55,7 +58,7 @@ batched, notification, chunked, dispatcher-targeted, malformed): every withheld 
 refused and never reaches the IDE, every allowed shape is forwarded byte for byte, and the
 same table against the previous revision fails five cases.
 
-### 2. A streamed response leaked the unfiltered tool list and wedged the response side — fixed
+### 2. A streamed response leaked the tool list and wedged the response side — fixed
 
 `forward_responses` treated an event-stream reply as "pass through and `break`" while
 holding `write_lock` for the life of the stream. Reproduced against a fake IDE:
@@ -73,20 +76,26 @@ so a closed client left both threads and the IDE's connection held.
 
 The stream is now forwarded chunk by chunk, so its terminator ends the body and the
 connection carries on: the `tools/list` reply after it is framed as a reply and scrubbed,
-and the lock is taken per burst, so a refusal reaches the client while the stream is open.
-`HttpConnection` reads through a short `select` poll rather than the whole budget, which
-lets a caller tell a quiet session from a lost peer; an open stream suspends the idle
-budget entirely, since a stream is the session's own channel rather than a lull. A body
-that pauses mid-message is retried rather than restarted, so a large reply survives a slow
-reader. Teardown ends both directions when the IDE goes away or a half-closed client's
-reply never arrives, while a client that only half-closes still receives its reply.
+and the lock is taken per burst. `HttpConnection` reads through a short `select` poll rather
+than the whole budget, which lets a caller tell a quiet session from a lost peer; an open
+stream suspends the idle budget entirely, since a stream is the session's own channel rather
+than a lull. A body that pauses mid-message is retried rather than restarted, so a large
+reply survives a slow reader. Teardown ends both directions when the IDE goes away or a
+half-closed client's reply never arrives, while a client that only half-closes still
+receives its reply.
 
 Verified against fake peers: events and a following `tools/list` reply both reach the
-client with the withheld tool scrubbed; a refusal arrives while the stream is open and is
-never forwarded; the stream's terminator is passed on and the session continues; an open
-stream survives a quiet budget while a stream-less session is closed at it; a 1.6 MB reply
-is delivered byte for byte to a slow reader; and both directions end when either peer
-goes away.
+client with the withheld tool scrubbed; the stream's terminator is passed on and the
+session continues; an open stream survives a quiet budget while a stream-less session is
+closed at it; a 1.6 MB reply is delivered byte for byte to a slow reader; and both
+directions end when either peer goes away.
+
+The refusal took a second pass. "A refusal reaches the client while the stream is open" was
+verified with a reader that treats whatever arrives as a fresh HTTP message, and none of
+those bytes are: a reply written to a connection whose response is still in flight lands
+inside that response's body and breaks the stream. See
+[Second review, item 1](#1-a-refusal-during-an-open-stream-is-written-inside-the-stream-body-fixed),
+which records both the reproduction and the fix.
 
 ### 3. `junie-tty-filter.py` lost the CLI's exit status and hung on non-tty stdin — fixed
 
@@ -269,12 +278,14 @@ budget; and a forced exception inside `handle` is logged as `connection failed` 
 socket closed. A live daemon still answers `health` with its protocol version and rejects a
 secretless preamble.
 
-### 9. `splice` re-raises a write error
+### 9. `splice` re-raises a write error — still open
 
 `peers[source].sendall` sits outside the `try` that guards `recv`, so a peer closing its
 read side raises `BrokenPipeError` out of `splice_to`/`relay_rpc` (reproduced). The
 `finally` closes the sockets, so nothing leaks, but a routine disconnect writes a traceback
-into the log.
+into the log. The second pass reproduced it again in both copies of `splice`, the daemon's
+and the endpoint's; see
+[Second review, item 4](#4-splice-still-re-raises-a-write-error).
 
 ## Low severity
 
@@ -395,9 +406,11 @@ into the log.
    `python3 -m unittest discover -s tests` runs both, and ten of the cases fail against
    the revision that had the allowlist holes.
 
-## Priority
+## Priority (first pass)
 
-1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`.
+1. ~~The three allowlist holes and the stream lock~~ — done in `bin/junie-ide-relayd`. The
+   refusal written while a stream is open took a second pass; see the second review's first
+   item, which reproduces it and records the fix.
 2. ~~The exit status and stdin EOF in `junie-tty-filter.py`~~ — done.
 3. ~~The missing bindfs presence check in `setup-junie-sbx.sh`~~ — done. ~~The
    idempotent, non-interactive home init in `junie-sbx.sh`~~ — done.
@@ -428,3 +441,184 @@ into the log.
 19. ~~The filter's shared deadline and its blocking output write~~ — done; the holds have
     separate budgets, and the terminal is fed by a thread so a stalled one cannot wedge
     input.
+20. The `splice` write error — open; see
+    [Second review, item 4](#4-splice-still-re-raises-a-write-error).
+
+## Second review
+
+Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
+file was read again, and `bash -n` and `dash -n` are clean. Item 1 was fixed after that read,
+so `python3 -m unittest discover -s tests` now runs 53 cases. The shell-side fixes behave as
+the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
+non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
+is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
+filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
+`SIGHUP` about 4 s after its terminal goes away.
+
+The relay's newer code is where the faults are. Item 1 is fixed; the rest stand.
+
+### High severity
+
+#### 1. A refusal during an open stream is written inside the stream body — fixed
+
+`forward_requests` answered a withheld call with `client.sendall` while `forward_responses`
+was pumping `GET /stream` on the same socket. Those bytes cannot be a reply: HTTP/1.1 has one
+response in flight per connection, so they landed in the middle of the still-open chunked
+body. Reproduced over a socket pair, `tools/call` for `execute_terminal_command` sent with
+the stream open:
+
+```
+stream head:   HTTP/1.1 200 OK / text/event-stream / Transfer-Encoding: chunked
+first chunk:   b'b\r\ndata: tick\n\n\r\n'
+then, inside that same body:
+  HTTP/1.1 200 OK / Content-Type: application/json / Content-Length: 109
+  {"jsonrpc":"2.0","id":2,"error":{"code":-32601,...}}
+decode_chunked(those bytes): None
+```
+
+The client's body reader met `HTTP/1.1 200 OK` where a chunk size belongs, so the stream
+failed and the refusal never arrived as a message it could match. Taking the lock per burst
+did not help: the refusal was written between the head and a chunk frame as readily as after
+one. `tests/test_relayd.py::StreamTest` asserted the refusal arrives, but its reader treated
+whatever arrives as a fresh HTTP message, which no HTTP client does.
+
+The other two ways out were rejected: ending the stream would hand the CLI a dropped
+session every time it asked for a tool it may not reach, and one request per connection would
+put a reconnect on every exchange. A refusal is instead queued while a stream body is in
+flight and written once its terminator frees the connection.
+
+`pump_stream` now marks `streaming` before the head goes out, not after, since a refusal
+written between the head and the first chunk lands in the body just as surely. `answer_locked`
+writes straight to the client when no stream is open and appends to `owed` when one is;
+`release_owed` drains that queue after the terminator, inside the same lock, so a reply cannot
+slip ahead of it. Every path that answers the client — a refusal, a parse error, an ordinary
+reply — goes through `answer_locked`, so the one response in flight is the only thing on the
+wire. A stream is the only response that outlives one burst; every other is written whole.
+
+Verified over a socket pair: with the stream open, a withheld call writes nothing into the
+body (`b""` on the client socket, and the chunk decoder gets nothing to fail on), the events
+after it still arrive as chunks, the terminator is passed on, and the refusal is then read as
+its own message with `id: 2`. Two refusals queued during one body arrive in order after its
+terminator, and a `tools/list` reply that follows on the same connection is still scrubbed.
+The previous revision, driven the same way, writes the response head into the body and the
+chunk decoder returns None. `tests/test_relayd.py` covers the first two: a refusal that writes
+nothing into the body and arrives after the terminator, and a stream that keeps carrying its
+events past a refusal.
+
+The queue has a cap (`OWED_LIMIT`, 1024), because a client that keeps asking for withheld tools
+during one body is the only way to make it grow, and a session that did grow it would hold
+memory for as long as the stream lasts. Past the cap the session ends rather than queueing a
+message nothing will read; a third test drives that and reads the EOF.
+
+#### 2. A batched reply keeps the tool names the scrub removes
+
+`tool_calls` reads requests member by member; `scrub_payload` requires a `dict` on the
+reply side. A `POST` holding two `tools/list` calls is answered with a batch, forwarded
+verbatim:
+
+```
+client received: [{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_a"}]}},
+                  {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"execute_terminal_command"}]}}]
+```
+
+Calls are still refused, so the boundary holds; what reaches the sandbox is the listing the
+scrub exists to remove, and `kit/README.md`'s "a batch is checked member by member" covers
+only the request direction.
+
+#### 3. A reply the filter cannot read is forwarded unfiltered
+
+`filtered_response` returns None both for a body that changed nothing and for one it could
+not read, and the caller forwards either. Two shapes carry a JSON tool listing through the
+second path:
+
+- `Content-Encoding: gzip`, which a client that sends `Accept-Encoding` provokes.
+  Reproduced: a gzipped `tools/list` reply reached the client with
+  `execute_terminal_command` listed.
+- `Content-Type: text/event-stream` with a `Content-Length`: `is_bounded` answers False, so
+  `pump_stream` forwards the head and body and then treats the following reply as more
+  stream. Reproduced: the next `tools/list` reply arrived unscrubbed, and the connection
+  continued.
+
+Pinning `Accept-Encoding: identity` on the request side closes the first; `is_bounded`
+counting a declared length ahead of the media type closes the second.
+
+### Medium severity
+
+#### 4. `splice` still re-raises a write error
+
+Item 9 of the first pass, which its priority list never named, and unchanged. `sendall`
+sits outside the guard that wraps `recv`, so a peer that has closed its read side raises
+`BrokenPipeError` out of `splice` (reproduced in both copies). In the daemon `serve` catches
+it and writes `connection failed: BrokenPipeError` for a routine disconnect; the endpoint's
+copy has no guard, so its connection thread dies without a word.
+
+#### 5. The endpoint needs IPv6 to start at all
+
+`junie-ide-relay-endpoint.py: bind` constructs the IPv6 socket inside the loop but outside
+the `try`, so a kernel without IPv6 (`EAFNOSUPPORT`, which a disabled module gives) aborts
+the endpoint after the IPv4 listener has bound — against the docstring's "a partial bind
+still serves, and only having neither is fatal". Reproduced by stubbing `socket.socket`.
+Constructing it inside the `try` is the whole fix.
+
+#### 6. `junie-init.sh` assumes `$HOME`
+
+The spec runs it through `sh`, and `junie-ide-relay.sh` opens by saying the startup
+environment has no `$HOME` and defends itself accordingly. `junie-init.sh` uses `~` in every
+path. Under `dash` with `HOME` unset, `mkdir -p ~/.local/share` created a literal `~`
+directory in the working directory and every link landed inside it (reproduced), which
+leaves the `~/.local/bin/junie` entrypoint pointing at nothing. This runtime supplies
+`$HOME`, so the links under `/home/agent` are correct; the guard is what keeps it so.
+
+### Low severity
+
+1. The refusal body formats the tool name into a JSON template, so a quoted name produces
+   invalid JSON: `{"message":"Tool 'evil"tool\x' is not available"}`. `json.dumps` on the id
+   and the name.
+2. `junie-ide-relay.sh`'s `mcp_port_for_digest` passes the secret as `sys.argv[4]` to its
+   inline probe, so it is in the process list that the same file's comments keep it out of.
+   Nothing inside the sandbox gains from it; the rule the endpoints follow is what it
+   breaks.
+3. A head naming its framing twice (`Content-Length: 24` and `Content-Length: 46`) is
+   checked against the last value and forwarded with both, and `"0x4"` is accepted as a
+   chunk size. No working bypass follows — the checked range has to be valid JSON, and the
+   shorter IDE-side range would have to be a prefix of it — but refusing a second framing
+   header costs less than that argument does.
+4. `HttpConnection.read_head` and the chunked accumulation in `read_body_or_lull` have no
+   cap: 8 MB of headers without a terminator were buffered with the thread still reading.
+5. `setup-junie-sbx.sh` still creates `${JUNIE_RO}/_local/bin/junie`, left from `2d0b53f`.
+   Nothing mounts `junie_ro/_local`; `junie-sbx.sh` mounts `~/.local/bin` itself. Dead step,
+   and the `ln -s` aborts the script under `set -e` if that path is ever a real directory.
+6. `PROJ_DIR` is keyed on `basename $PWD` while the secret is keyed on the full path, so two
+   checkouts whose directories share a name share one `_junie` home and both overlay trees —
+   their sessions and caches mix — while their secrets stay distinct.
+7. `tests/scripts.py` sets `dont_write_bytecode` at import, which is too late for itself and
+   `tests/__init__.py`, so a run leaves `tests/__pycache__/` behind. Gitignored, and the
+   docstring's claim is about the kit file alone.
+
+### What holds
+
+The allowlist decides every shape the tests cover before the IDE sees it: single, batched,
+notification, chunked, dispatcher-targeted, and unparseable requests; `refused_tool`
+type-checks `params` and `arguments`; an empty list refuses everything and None is the only
+unfiltered path. The per-project secret, the exposed-record refusal at `EX_CONFIG` 78, the
+preamble deadline and the per-connection guard behave as documented. The
+filter's separate holds, its writer thread, the `1003h` → `1002h` rewrite with `1003l`
+passing through, the flush before the terminal is restored, and the exit-status and signal
+propagation are all correct.
+
+One question the code cannot answer from here: `DEFAULT_ALLOW_TOOLS` grants `read_*`,
+`list_*` and `get_*`. A `read_*` tool on the built-in server that reads a host path outside
+the project would give the sandbox a host read through the allowlist rather than through the
+payload the list is drawn against.
+
+### Priority for this pass
+
+1. ~~The refusal written into an open stream~~ — done; it waits for the terminator.
+2. The batch reply scrub; it is the same asymmetry as item 1 of the first pass, on the reply
+   side.
+3. `Accept-Encoding: identity`, and `is_bounded` reading a declared length ahead of the event
+   stream type.
+4. The `splice` write error, in both copies.
+5. The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`.
+6. The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
+   caps.
