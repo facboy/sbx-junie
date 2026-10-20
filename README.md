@@ -171,7 +171,10 @@ They are appended to the ones above, at their host paths, and a trailing `:ro` m
 as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a relative
 entry resolves against the project directory. A `mounts` value that is not a list of strings, or an
 entry naming a path the host does not have, stops the run and names it: `sbx` rejects a mount it
-cannot find, and reaching that refusal costs the rest of the startup.
+cannot find, and reaching that refusal costs the rest of the startup. An entry that is only `:ro`
+stops the run too, naming the missing path before the marker. Since a trailing `:ro` always means
+read-only, a directory whose own name ends in one cannot be mounted; an entry naming only such a
+directory stops the run rather than mounting the path the marker leaves behind.
 
 [`sbx.example.toml`](sbx.example.toml) holds every setting, commented, as a starting point: copy it
 to `<project>/.junie/sbx.toml`.

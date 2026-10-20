@@ -276,11 +276,25 @@ into the log.
    place the pin lives. The `1.61` statements in [Browser libraries](../README.md#browser-libraries)
    stay, since they record when Playwright began picking the 26.04 WebKit bundle rather than what
    this image pins.
-5. A `mounts` entry that is only `:ro` reduces to an empty path and is reported as "no host
-   path", which is true but not the setting that was wrong. The same unconditional strip
-   makes a real directory whose name ends in `:ro` unmountable, since the suffix is removed
-   whether or not the shortened path exists. Checking the full entry first and only
-   stripping when that path is absent would cover both.
+5. A `mounts` entry that was only `:ro` reduced to an empty path and was reported as "no host
+   path", which was true but not the setting that was wrong. It now says it is only the
+   marker, and asks for the host path in front of it.
+
+   The other half does not have the fix the review proposed. The script passes the entry
+   through to `sbx`, which strips a trailing `:ro` itself, so checking the full entry first
+   changes only which path *this* script validates — the string that reaches `sbx` is the
+   same either way, and a directory whose name ends in `:ro` still cannot be named. What the
+   script can do is refuse the entry when only the full name exists, since the mount would
+   otherwise silently land on the stripped path, and say why. A host that has both the
+   `:ro`-named directory and the one without is left alone: the marker reading is the one
+   `sbx` takes, so it is the one that works.
+
+   Verified by extracting the parser's heredoc out of the script and running it against
+   fixture configs, and by running the whole script with a stub `sbx`: `:ro` alone exits 1
+   naming the marker instead of "no host path"; a plain path and a path with the marker both
+   still resolve and reach `sbx` unchanged; a missing path, an empty entry, an embedded
+   newline and a non-list still exit 1; and the previous revision reports the bare marker as
+   "no host path".
 6. `junie-init.sh` appends to `~/.npmrc` only when the key is absent, so a stale
    `store-dir` from an earlier sandbox is never corrected.
 7. `kit/README.md` and `kit/spec.yaml` both give the `1003h` → `1002h` rewrite without the
@@ -324,3 +338,5 @@ into the log.
 10. ~~The 60 ms claim in `docs/fragmented-input-sequence.md`~~ — done; it says 50 ms.
 11. ~~The stale Playwright version in the README's build-arg example~~ — done; it names no
     version.
+12. ~~The `mounts` entry handling in `junie-sbx.sh`~~ — done; a bare `:ro` is named as the
+    marker.

@@ -87,9 +87,37 @@ read_config_file() {
 		                     % sys.argv[1])
 		    raise SystemExit(1)
 		for entry in mounts:
-		    path, ro = (entry[:-3], ":ro") if entry.endswith(":ro") else (entry, "")
-		    path = os.path.abspath(os.path.expanduser(path)) if path else ""
-		    if "\n" in entry or not path or not os.path.exists(path):
+		    # An entry naming no path is refused rather than reduced to the
+		    # working directory, which is what `abspath` would make of it.
+		    if "\n" in entry or not entry.strip():
+		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is no host path\n"
+		                         % (sys.argv[1], entry))
+		        raise SystemExit(1)
+		    # A bare `:ro` names the marker and no path, which is a different
+		    # mistake from naming one the host does not have.
+		    if entry.endswith(":ro") and not entry[:-3].strip():
+		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is only the "
+		                         "read-only marker: give the host path before it\n"
+		                         % (sys.argv[1], entry))
+		        raise SystemExit(1)
+		    path = os.path.abspath(os.path.expanduser(entry))
+		    ro = ""
+		    if entry.endswith(":ro"):
+		        # A trailing `:ro` is the marker, so the path it is read off is the
+		        # one that gets mounted -- `sbx` strips that suffix itself, and
+		        # there is no spelling for a directory whose own name ends in it.
+		        # When only that full name exists, the entry cannot mean what it
+		        # says, and saying so beats mounting a path the user did not name.
+		        stripped_path = os.path.abspath(os.path.expanduser(entry[:-3]))
+		        if os.path.exists(path) and not os.path.exists(stripped_path):
+		            sys.stderr.write(
+		                "junie-sbx: %s: mounts names %r, which is the read-only marker "
+		                "on %r -- a trailing :ro always means read-only, so a directory "
+		                "whose name ends in one cannot be mounted; rename it\n"
+		                % (sys.argv[1], entry, stripped_path))
+		            raise SystemExit(1)
+		        path, ro = stripped_path, ":ro"
+		    if "\n" in entry or not os.path.exists(path):
 		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is no host path\n"
 		                         % (sys.argv[1], entry))
 		        raise SystemExit(1)
