@@ -143,8 +143,9 @@ notice. The same relay carries it:
   sandbox's own Docker engine, which the base image carries. `execute_tool` resolves a tool by name
   from its own argument, so it is allowlisted to keep the routing working and a call through it is
   checked against the same list. Every shape a call arrives in is read: a batch is checked member
-  by member, a notification is answered like a request, a chunked body is decoded before it is
-  parsed, and a request body that will not parse is answered with an error instead of forwarded.
+  by member and a batched reply is scrubbed the same way, a notification is answered like a
+  request, a chunked body is decoded before it is parsed, and a request body that will not parse
+  is answered with an error instead of forwarded.
   The session's `GET /stream` reply is forwarded chunk by chunk, so its terminator ends the body
   rather than the connection: the replies the CLI asks for on that connection are still filtered.
   A connection carries one response at a time, so a refusal raised while that body is in flight

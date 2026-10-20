@@ -205,6 +205,34 @@ class AllowlistTest(unittest.TestCase):
         names = [tool["name"] for tool in session.reply_to_client()["result"]["tools"]]
         self.assertEqual(names, ["get_project_modules"])
 
+    def test_a_batched_reply_is_scrubbed_member_by_member(self):
+        session = self.session()
+        session.send(json.dumps([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]).encode())
+        session.reply([{"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+                           {"name": "get_project_modules"}, {"name": WITHHELD}]}},
+                       {"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+                           {"name": WITHHELD}]}}])
+        head, body = session.client_reader.read_message()
+        replies = json.loads(body)
+        self.assertNotIn(WITHHELD.encode(), body)
+        self.assertEqual([tool["name"] for tool in replies[0]["result"]["tools"]],
+                         ["get_project_modules"])
+        self.assertEqual(replies[1]["result"]["tools"], [])
+        # The body was re-framed, so the head still describes it.
+        self.assertEqual(relayd.parse_head(head)[1][b"content-length"],
+                         b"%d" % len(body))
+
+    def test_a_batch_inside_the_allowlist_is_forwarded_untouched(self):
+        session = self.session()
+        session.send(json.dumps([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}]).encode())
+        session.forwarded()
+        body = json.dumps([{"jsonrpc": "2.0", "id": 1,
+                            "result": {"tools": [{"name": "get_project_modules"}]}}]).encode()
+        session.ide.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                            b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        self.assertEqual(session.client_reader.read_message()[1], body)
+
     def test_filter_off_forwards_everything(self):
         session = self.session(allow=None)
         raw = session.send(call(WITHHELD))

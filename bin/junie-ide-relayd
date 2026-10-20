@@ -881,8 +881,18 @@ def scrub_tool_list(text, allow):
 def scrub_payload(payload, allow):
     """Remove unlisted tools from a `tools/list` result and a dispatch listing.
 
+    A batch is read member by member, as a request batch is: two `tools/list`
+    calls are answered with two replies in one body, and a listing in any of them
+    has to lose the same names.
+
     Returns True when the payload changed and so has to be re-framed.
     """
+    if isinstance(payload, list):
+        changed = False
+        for member in payload:
+            if scrub_payload(member, allow):
+                changed = True
+        return changed
     if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
         return False
     result = payload["result"]

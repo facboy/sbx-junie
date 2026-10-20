@@ -448,14 +448,14 @@ and the endpoint's; see
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
 file was read again, and `bash -n` and `dash -n` are clean. Item 1 was fixed after that read,
-so `python3 -m unittest discover -s tests` now runs 53 cases. The shell-side fixes behave as
+so `python3 -m unittest discover -s tests` now runs 55 cases. The shell-side fixes behave as
 the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
 non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Item 1 is fixed; the rest stand.
+The relay's newer code is where the faults are. Items 1 and 2 are fixed; the rest stand.
 
 ### High severity
 
@@ -510,20 +510,29 @@ during one body is the only way to make it grow, and a session that did grow it 
 memory for as long as the stream lasts. Past the cap the session ends rather than queueing a
 message nothing will read; a third test drives that and reads the EOF.
 
-#### 2. A batched reply keeps the tool names the scrub removes
+#### 2. A batched reply keeps the tool names the scrub removes — fixed
 
-`tool_calls` reads requests member by member; `scrub_payload` requires a `dict` on the
-reply side. A `POST` holding two `tools/list` calls is answered with a batch, forwarded
-verbatim:
+`tool_calls` read requests member by member; `scrub_payload` required a `dict` on the reply
+side. A `POST` holding two `tools/list` calls was answered with a batch, forwarded verbatim:
 
 ```
 client received: [{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_a"}]}},
                   {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"execute_terminal_command"}]}}]
 ```
 
-Calls are still refused, so the boundary holds; what reaches the sandbox is the listing the
-scrub exists to remove, and `kit/README.md`'s "a batch is checked member by member" covers
+Calls were still refused, so the boundary held; what reached the sandbox was the listing the
+scrub exists to remove, and `kit/README.md`'s "a batch is checked member by member" covered
 only the request direction.
+
+`scrub_payload` now recurses into a list, member by member, and reports a change if any
+member changed. That is the same reading `tool_calls` gives a request batch, so the two
+directions agree again.
+
+Verified over a socket pair: a batch holding two listings arrives with the withheld tool
+removed from both, the second member's list empty, and a `Content-Length` matching the
+re-framed body; a batch naming only allowed tools is forwarded byte for byte. The previous
+revision sends both `execute_terminal_command` entries through, which the new case reports as
+an `AssertionError`.
 
 #### 3. A reply the filter cannot read is forwarded unfiltered
 
@@ -601,10 +610,10 @@ The allowlist decides every shape the tests cover before the IDE sees it: single
 notification, chunked, dispatcher-targeted, and unparseable requests; `refused_tool`
 type-checks `params` and `arguments`; an empty list refuses everything and None is the only
 unfiltered path. The per-project secret, the exposed-record refusal at `EX_CONFIG` 78, the
-preamble deadline and the per-connection guard behave as documented. The
-filter's separate holds, its writer thread, the `1003h` → `1002h` rewrite with `1003l`
-passing through, the flush before the terminal is restored, and the exit-status and signal
-propagation are all correct.
+preamble deadline and the per-connection guard behave as documented. The filter's separate
+holds, its writer thread, the `1003h` → `1002h` rewrite with `1003l` passing through, the
+flush before the terminal is restored, and the exit-status and signal propagation are all
+correct.
 
 One question the code cannot answer from here: `DEFAULT_ALLOW_TOOLS` grants `read_*`,
 `list_*` and `get_*`. A `read_*` tool on the built-in server that reads a host path outside
@@ -614,8 +623,7 @@ payload the list is drawn against.
 ### Priority for this pass
 
 1. ~~The refusal written into an open stream~~ — done; it waits for the terminator.
-2. The batch reply scrub; it is the same asymmetry as item 1 of the first pass, on the reply
-   side.
+2. ~~The batch reply scrub~~ — done; `scrub_payload` reads a batch member by member.
 3. `Accept-Encoding: identity`, and `is_bounded` reading a declared length ahead of the event
    stream type.
 4. The `splice` write error, in both copies.

@@ -268,12 +268,13 @@ names no built-in server, so a port the IDE gave up is not held open.
 Those tools reach the host, so the daemon allowlists them rather than passing the IDE's list
 through: a tool the allowlist does not name is removed from `tools/list` and refused before the IDE
 sees the call, which is what keeps a tool a later IDE build adds from arriving unreviewed. Every
-shape a call arrives in is read — a batch member by member, a notification like a request, a
-chunked body after its framing is removed — and a body that will not parse is answered with an
-error rather than forwarded. The session's `GET /stream` stays open for the life of the session,
-so it is forwarded chunk by chunk and the replies asked for on that connection are filtered as
-they arrive instead of being swallowed by the stream. A refusal raised while the stream's body is
-still in flight waits for the terminator and is written then, since a connection carries one
+shape a call arrives in is read — a batch member by member, a request and a reply alike, a
+notification like a request, a chunked body after its framing is removed — and a body that will
+not parse is answered with an error rather than forwarded. The session's `GET /stream` stays open
+for the life of the session, so it is forwarded chunk by chunk and the replies asked for on that
+connection are filtered as they arrive instead of being swallowed by the stream. A refusal raised
+while the stream's body is still in flight waits for the terminator and is written then, since a
+connection carries one
 response at a time and one written mid-body would be read as part of it. Nothing that runs
 project-controlled code on the host is named, and nothing that addresses host state the sandbox
 could then reach through it, because the project is shared with the host writable and so is the
