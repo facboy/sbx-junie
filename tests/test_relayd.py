@@ -233,6 +233,43 @@ class AllowlistTest(unittest.TestCase):
                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
         self.assertEqual(session.client_reader.read_message()[1], body)
 
+    def test_accept_encoding_is_dropped_on_the_way_to_the_ide(self):
+        session = self.session()
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+        session.client.sendall(b"POST /mcp HTTP/1.1\r\nHost: relay\r\n"
+                               b"Content-Type: application/json\r\n"
+                               b"Accept-Encoding: gzip, deflate\r\n"
+                               b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        forwarded = session.forwarded()
+        self.assertNotIn(b"Accept-Encoding", forwarded)
+        self.assertTrue(forwarded.endswith(body))
+
+    def test_a_length_delimited_event_stream_is_followed_by_a_filtered_reply(self):
+        session = self.session()
+        event = b"data: tick\n\n"
+        session.ide.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                            b"Content-Length: %d\r\n\r\n" % len(event) + event)
+        self.assertEqual(session.client_reader.read_message()[1], event)
+        session.reply({"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+            {"name": "get_project_modules"}, {"name": WITHHELD}]}})
+        names = [tool["name"] for tool in session.reply_to_client()["result"]["tools"]]
+        self.assertEqual(names, ["get_project_modules"])
+
+    def test_a_reply_the_filter_cannot_read_ends_the_session(self):
+        session = self.session()
+        session.send(json.dumps({"jsonrpc": "2.0", "id": 1,
+                                 "method": "tools/list"}).encode())
+        session.forwarded()
+        # The daemon says why on stderr; the test keeps that off its own output.
+        with contextlib.redirect_stderr(io.StringIO()):
+            session.ide.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                b"Content-Encoding: gzip\r\nContent-Length: 3\r\n\r\n"
+                                b"\x1f\x8b\x08")
+            session.client.settimeout(2.0)
+            self.assertEqual(session.client.recv(65536), b"")
+        session.thread.join(TIMEOUT)
+        self.assertFalse(session.thread.is_alive())
+
     def test_filter_off_forwards_everything(self):
         session = self.session(allow=None)
         raw = session.send(call(WITHHELD))
@@ -362,15 +399,23 @@ class ParserTest(unittest.TestCase):
                            "result": {"tools": [{"name": WITHHELD}]}}).encode()
         head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                 b"Content-Length: %d\r\n\r\n" % len(body))
-        new_head, new_body = relayd.filtered_response(head, body, ALLOW)
+        reply = relayd.filtered_response(head, body, ALLOW)
+        new_head, new_body = reply.split(b"\r\n\r\n", 1)
         self.assertEqual(relayd.parse_head(new_head)[1][b"content-length"],
                          b"%d" % len(new_body))
         self.assertEqual(json.loads(new_body)["result"]["tools"], [])
 
-    def test_filtered_response_passes_a_non_json_reply(self):
+    def test_filtered_response_passes_a_reply_it_has_nothing_to_scrub_in(self):
         head = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
                 b"Content-Length: 2\r\n\r\n")
-        self.assertIsNone(relayd.filtered_response(head, b"hi", ALLOW))
+        self.assertEqual(relayd.filtered_response(head, b"hi", ALLOW), head + b"hi")
+
+    def test_filtered_response_refuses_a_json_body_it_cannot_parse(self):
+        # A reply the daemon cannot read names no tool it can check, so it is not
+        # passed on: a listing inside it would reach the client unfiltered.
+        head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Encoding: gzip\r\nContent-Length: 3\r\n\r\n")
+        self.assertIsNone(relayd.filtered_response(head, b"\x1f\x8b\x08", ALLOW))
 
     def test_rebuild_head_replaces_the_framing(self):
         head = (b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n"

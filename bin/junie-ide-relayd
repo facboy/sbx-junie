@@ -28,6 +28,12 @@ is answered like a request, a chunked body is decoded before it is read -- and a
 request body the daemon cannot parse is answered rather than forwarded, since it
 names no tool to check.
 
+The reply side is read the same way: a `tools/list` result, in a batch as in a
+single reply, loses the tools the allowlist withholds. The daemon cannot open a
+compressed body, so it drops the client's `Accept-Encoding` on the way to the IDE,
+and a reply it still cannot read ends the session rather than reaching the client
+unfiltered.
+
 A session's `GET /stream` stays open for the life of the session, and the CLI
 sends its requests on the same connection while nothing is written to that
 stream. So the stream is forwarded chunk by chunk and its terminator ends the
@@ -793,15 +799,18 @@ def read_body(conn, headers):
 def is_bounded(head, headers):
     """Whether a response ends by itself, rather than streaming until close.
 
-    A declared length, or a terminating chunk, ends the body. `GET /stream` is
-    the session's server-to-client channel: it stays open for the life of the
-    session, so neither framing bounds it and it is passed through as it arrives.
+    A declared length ends the body, whatever its media type: an event stream
+    that says how long it is has ended by the time it arrives, and treating it as
+    a stream would leave the replies after it unread. A terminating chunk also
+    ends a body, except for an event stream, which is the session's
+    server-to-client channel: that one stays open for the life of the session and
+    is passed through as it arrives.
     """
+    if b"content-length" in headers or header_status(head) in (204, 304):
+        return True
     if is_event_stream(headers):
         return False
-    if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
-        return True
-    return b"content-length" in headers or header_status(head) in (204, 304)
+    return b"chunked" in headers.get(b"transfer-encoding", b"").lower()
 
 
 def is_event_stream(headers):
@@ -947,29 +956,54 @@ def decode_chunked(raw):
 
 
 def filtered_response(head, body, allow):
-    """A response with the tools outside `allow` removed, or None to pass it.
+    """The reply to send the client, or None when the filter cannot read it.
 
-    Only a JSON body is rewritten. An event-stream body carries its payload on
-    `data:` lines, and a listing on one is left alone: the IDE answers a
-    `tools/list` on JSON -- it refuses a request that accepts events alone -- and
-    a client that did ask for events still has its calls refused.
+    A reply carrying no tool listing is returned as it came: a body with nothing
+    to remove, or a media type the filter does not read, which is not a JSON
+    listing. A body that claims to be JSON and is not, or a chunked body whose
+    framing does not decode, is None rather than passed on: the daemon cannot see
+    what tools it names, so forwarding it would hand the client an unfiltered
+    list. `strip_accept_encoding` is what keeps the IDE from compressing a reply
+    the daemon would then fail to read.
+
+    An event-stream body is not JSON, so a listing on one is returned as it came;
+    the IDE answers a `tools/list` on JSON, and a client that asked for events
+    still has its calls refused.
     """
     _, headers = parse_head(head)
     if b"json" not in headers.get(b"content-type", b"").lower():
-        return None
+        return head + body
     content = body
     if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
         content = decode_chunked(body)
         if content is None:
             return None
+    if not content.strip():
+        return head + body
     try:
         payload = json.loads(content)
     except ValueError:
         return None
     if not scrub_payload(payload, allow):
-        return None
+        return head + body
     encoded = json.dumps(payload).encode()
-    return rebuild_head(head, len(encoded)), encoded
+    return rebuild_head(head, len(encoded)) + encoded
+
+
+def strip_accept_encoding(head):
+    """`head` with its `Accept-Encoding` removed, so a reply arrives as JSON.
+
+    The filter parses a reply to remove the tools the allowlist withholds, and it
+    cannot open a compressed one. A client that offers a coding -- which the CLI,
+    being an HTTP client, may -- would otherwise get a listing back that the
+    daemon could only forward unread.
+    """
+    lines = head.split(b"\r\n")
+    kept = [line for line in lines
+            if line and line.partition(b":")[0].strip().lower() != b"accept-encoding"]
+    if len(kept) == len([line for line in lines if line]):
+        return head
+    return b"\r\n".join(kept) + b"\r\n\r\n"
 
 
 def splice(client, upstream):
@@ -1278,8 +1312,11 @@ def splice_mcp(client, upstream, allow):
                         continue
                 if finished.is_set():
                     return
+                # A reply the daemon cannot parse cannot be filtered, so the IDE
+                # is asked for one it can read.
+                forwarded_head = head if allow is None else strip_accept_encoding(head)
                 try:
-                    upstream.sendall(head + body)
+                    upstream.sendall(forwarded_head + body)
                 except OSError:
                     # The IDE is gone, so nothing will answer this or anything
                     # already in flight: the whole session ends here.
@@ -1390,8 +1427,18 @@ def splice_mcp(client, upstream, allow):
                 body = read_body_or_lull(upstream_conn, headers)
                 if body is None:
                     return
-                replaced = filtered_response(head, body, allow) if allow is not None else None
-                if not answer_locked(head + body if replaced is None else b"".join(replaced)):
+                if allow is None:
+                    reply = head + body
+                else:
+                    reply = filtered_response(head, body, allow)
+                    if reply is None:
+                        # The daemon cannot read this reply, so it cannot see the
+                        # tools it names: answering the client closes the session
+                        # rather than handing it a list the filter never saw.
+                        sys.stderr.write("junie-ide-relayd: closing a session whose "
+                                         "reply the filter could not read\n")
+                        return
+                if not answer_locked(reply):
                     return
         except OSError:
             pass

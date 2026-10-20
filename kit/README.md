@@ -145,7 +145,9 @@ notice. The same relay carries it:
   checked against the same list. Every shape a call arrives in is read: a batch is checked member
   by member and a batched reply is scrubbed the same way, a notification is answered like a
   request, a chunked body is decoded before it is parsed, and a request body that will not parse
-  is answered with an error instead of forwarded.
+  is answered with an error instead of forwarded. The reply side is parsed too: the daemon drops
+  the client's `Accept-Encoding`, since it cannot open a compressed body, and a reply it still
+  cannot read ends the session rather than reaching the CLI unfiltered.
   The session's `GET /stream` reply is forwarded chunk by chunk, so its terminator ends the body
   rather than the connection: the replies the CLI asks for on that connection are still filtered.
   A connection carries one response at a time, so a refusal raised while that body is in flight

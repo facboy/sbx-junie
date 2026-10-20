@@ -448,14 +448,14 @@ and the endpoint's; see
 
 Review of the repository at `bcf1005`, with this file's own fixes in place. Every tracked
 file was read again, and `bash -n` and `dash -n` are clean. Item 1 was fixed after that read,
-so `python3 -m unittest discover -s tests` now runs 55 cases. The shell-side fixes behave as
+so `python3 -m unittest discover -s tests` now runs 59 cases. The shell-side fixes behave as
 the doc says: the bindfs prerequisite stops before `junie_ro` exists, the home init is
 non-interactive and idempotent, the tab separator survives a whitespace pass, a bare `:ro`
 is named as the marker, `~/.npmrc` is rewritten, and the watcher pidfile goes at exit. The
 filter reports `exit 3` as 3, 127 for a missing command, and ends a child that ignores
 `SIGHUP` about 4 s after its terminal goes away.
 
-The relay's newer code is where the faults are. Items 1 and 2 are fixed; the rest stand.
+The relay's newer code is where the faults are. Items 1 to 3 are fixed; the rest stand.
 
 ### High severity
 
@@ -534,22 +534,38 @@ re-framed body; a batch naming only allowed tools is forwarded byte for byte. Th
 revision sends both `execute_terminal_command` entries through, which the new case reports as
 an `AssertionError`.
 
-#### 3. A reply the filter cannot read is forwarded unfiltered
+#### 3. A reply the filter cannot read is forwarded unfiltered — fixed
 
-`filtered_response` returns None both for a body that changed nothing and for one it could
-not read, and the caller forwards either. Two shapes carry a JSON tool listing through the
-second path:
+`filtered_response` returned None both for a body that changed nothing and for one it could
+not read, and the caller forwarded either. Two shapes carried a JSON tool listing through
+the second path:
 
 - `Content-Encoding: gzip`, which a client that sends `Accept-Encoding` provokes.
   Reproduced: a gzipped `tools/list` reply reached the client with
   `execute_terminal_command` listed.
-- `Content-Type: text/event-stream` with a `Content-Length`: `is_bounded` answers False, so
-  `pump_stream` forwards the head and body and then treats the following reply as more
+- `Content-Type: text/event-stream` with a `Content-Length`: `is_bounded` answered False, so
+  `pump_stream` forwarded the head and body and then treated the following reply as more
   stream. Reproduced: the next `tools/list` reply arrived unscrubbed, and the connection
   continued.
 
-Pinning `Accept-Encoding: identity` on the request side closes the first; `is_bounded`
-counting a declared length ahead of the media type closes the second.
+`is_bounded` now reads a declared length ahead of the media type, so a length-delimited event
+stream is a body that ends, and the reply after it is filtered as a reply. A chunked
+event stream is still the session's own channel and is still pumped as one.
+
+On the way to the IDE, `strip_accept_encoding` drops the client's `Accept-Encoding`, so the
+IDE is never asked for a coding the daemon cannot open. That removes the provocation but not
+the need to decide: `filtered_response` now returns a whole message for a reply it has
+nothing to scrub in, and None only for a body the filter cannot read — a JSON body that will
+not parse, or a chunked body whose framing does not decode. None from that function now ends
+the session, with a line on stderr, rather than forwarding the reply.
+
+Verified over a socket pair: a request carrying `Accept-Encoding: gzip, deflate` reaches the
+IDE without the header and with the rest of the message intact; a gzipped reply closes the
+session with the client reading EOF and the connection thread gone; and a length-delimited
+event stream is followed by a `tools/list` reply that arrives scrubbed. `tests/test_relayd.py`
+covers the three shapes the parser now distinguishes — a listing re-framed, a reply with
+nothing to scrub passed on whole, and a JSON body that will not parse refused — plus the
+three above end to end, and still shows a chunked stream pumped chunk by chunk.
 
 ### Medium severity
 
@@ -624,8 +640,8 @@ payload the list is drawn against.
 
 1. ~~The refusal written into an open stream~~ — done; it waits for the terminator.
 2. ~~The batch reply scrub~~ — done; `scrub_payload` reads a batch member by member.
-3. `Accept-Encoding: identity`, and `is_bounded` reading a declared length ahead of the event
-   stream type.
+3. ~~A reply the filter cannot read~~ — done; `Accept-Encoding` is dropped on the way out,
+   `is_bounded` reads a declared length first, and an unreadable reply ends the session.
 4. The `splice` write error, in both copies.
 5. The endpoint's IPv6 bind, and `junie-init.sh`'s `$HOME`.
 6. The refusal body's JSON, the probe's argv, the duplicate framing header, and the read
