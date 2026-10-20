@@ -272,12 +272,14 @@ shape a call arrives in is read — a batch member by member, a notification lik
 chunked body after its framing is removed — and a body that will not parse is answered with an
 error rather than forwarded. The session's `GET /stream` stays open for the life of the session,
 so it is forwarded chunk by chunk and the replies asked for on that connection are filtered as
-they arrive instead of being swallowed by the stream. Nothing that runs project-controlled code
-on the host is named, and nothing that addresses host state the sandbox could then reach through
-it, because the project is shared with the host writable and so is the payload: `build_project`
-runs its build tooling, `lint_files` and `reformat_file` its configured linters and formatters,
-`execute_run_configuration` a run point the sandbox writes into the project as an executable
-script, and `execute_sql_query` a statement against a configured database;
+they arrive instead of being swallowed by the stream. A refusal raised while the stream's body is
+still in flight waits for the terminator and is written then, since a connection carries one
+response at a time and one written mid-body would be read as part of it. Nothing that runs
+project-controlled code on the host is named, and nothing that addresses host state the sandbox
+could then reach through it, because the project is shared with the host writable and so is the
+payload: `build_project` runs its build tooling, `lint_files` and `reformat_file` its configured
+linters and formatters, `execute_run_configuration` a run point the sandbox writes into the project
+as an executable script, and `execute_sql_query` a statement against a configured database;
 `execute_terminal_command` runs a shell command outright. A Jupyter kernel is the same shape over a
 longer reach — it holds live objects, and `configure_python_interpreter` names an interpreter path
 the sandbox can write — so `run_notebook_cell`, `execute_code_on_kernel`, `interrupt_notebook` and

@@ -42,6 +42,19 @@ class Reader:
         data, self.buffer = self.buffer[:count], self.buffer[count:]
         return data
 
+    def quiet(self):
+        """Whatever arrives in the next moment, or None when nothing does."""
+        self.sock.settimeout(0.3)
+        try:
+            data = self.sock.recv(65536)
+        except socket.timeout:
+            return None
+        finally:
+            self.sock.settimeout(TIMEOUT)
+        if not data:
+            raise EOFError("socket closed")
+        return data
+
     def read_chunk(self):
         """One chunk frame, with the framing it arrived in."""
         size = int(self.read_until(b"\r\n")[:-2].split(b";")[0], 16)
@@ -231,18 +244,48 @@ class StreamTest(unittest.TestCase):
         names = [tool["name"] for tool in session.reply_to_client()["result"]["tools"]]
         self.assertEqual(names, ["get_project_modules"])
 
-    def test_a_refusal_reaches_the_client_while_the_stream_is_open(self):
+    def test_a_refusal_waits_for_the_stream_body_and_then_arrives(self):
         session = self.session()
         event = b"data: x\n\n"
         session.ide.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
         session.client_reader.read_chunk()
         session.send(call(WITHHELD))
-        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
         self.assertTrue(session.ide_is_silent())
+        # Nothing may be written into the body: a reply there is read as a chunk
+        # size, and the stream breaks.
+        self.assertIsNone(session.client_reader.quiet())
+        session.ide.sendall(b"0\r\n\r\n")
+        self.assertEqual(session.client_reader.read_chunk(), b"0\r\n\r\n")
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+
+    def test_the_stream_survives_a_refusal_and_carries_its_events(self):
+        session = self.session()
+        event = b"data: x\n\n"
+        session.ide.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+        session.client_reader.read_chunk()
+        session.send(call(WITHHELD))
         second = b"data: y\n\n"
         session.ide.sendall(b"%x\r\n" % len(second) + second + b"\r\n")
         self.assertEqual(session.client_reader.read_chunk(),
                          b"%x\r\n" % len(second) + second + b"\r\n")
+        session.ide.sendall(b"0\r\n\r\n")
+        self.assertEqual(session.client_reader.read_chunk(), b"0\r\n\r\n")
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+
+    def test_a_flood_of_refusals_ends_the_session_rather_than_queueing_for_ever(self):
+        session = self.session()
+        event = b"data: x\n\n"
+        session.ide.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+        session.client_reader.read_chunk()
+        # Past the cap the queue stops growing, and the session ends: the client
+        # that flooded a body it was not reading is not owed an answer.
+        try:
+            for _ in range(relayd.OWED_LIMIT + 2):
+                session.send(call(WITHHELD))
+        except BrokenPipeError:
+            pass
+        session.client.settimeout(2.0)
+        self.assertEqual(session.client.recv(65536), b"")
 
 
 class ParserTest(unittest.TestCase):

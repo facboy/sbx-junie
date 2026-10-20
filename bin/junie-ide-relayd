@@ -30,13 +30,14 @@ names no tool to check.
 
 A session's `GET /stream` stays open for the life of the session, and the CLI
 sends its requests on the same connection while nothing is written to that
-stream. So the stream is forwarded chunk by chunk, its terminator ends the body
-and the replies after it are filtered as replies, and the write lock is taken
-per burst rather than held for the stream: a refusal or a `tools/list` reply
-still reaches the client while the stream is open. An open stream is also what
-keeps the idle budget from closing the connection; once it ends, a session with
-no traffic for `IDLE_TIMEOUT` is closed. The RPC relay above is left a plain
-splice.
+stream. So the stream is forwarded chunk by chunk and its terminator ends the
+body, which leaves the connection able to carry the replies after it. A
+connection carries one response at a time, so a refusal issued while a stream
+body is in flight waits until that body's terminator and is written then; a
+refusal written mid-body would be read as part of it. An open stream is also
+what keeps the idle budget from closing the connection; once it ends, a session
+with no traffic for `IDLE_TIMEOUT` is closed. The RPC relay above is left a
+plain splice.
 
 Every preamble but `health` carries the sandbox's secret, which `junie-sbx.sh`
 provisions as it starts the sandbox: one record per project under
@@ -94,6 +95,7 @@ secret cannot be compared -- it is not ASCII, so `hmac.compare_digest` would rai
 serving every other project.
 """
 import argparse
+import collections
 import hashlib
 import hmac
 import http.client
@@ -200,6 +202,11 @@ POLL_TIMEOUT = 30
 # be reading -- so the splice cannot end on it immediately, and waiting on an
 # IDE that will never answer is what holds the connection open.
 REAP_TIMEOUT = 60
+# How many answers may be held for a stream body that is still open. Each is a
+# refusal, so a client that keeps asking for withheld tools during one body is
+# the only way to reach this; past it the session ends rather than growing the
+# queue for as long as the stream lasts.
+OWED_LIMIT = 1024
 
 
 def resolve_instances(explicit):
@@ -1095,6 +1102,10 @@ def splice_mcp(client, upstream, allow):
     write_lock = threading.Lock()
     session = {"last": time.monotonic()}
     finished = threading.Event()
+    # Refusals the client is owed while its stream's body is still in flight. A
+    # connection carries one response at a time, so one written then would land
+    # inside the stream's chunked body and break it.
+    owed = collections.deque()
 
     def note_activity():
         session["last"] = time.monotonic()
@@ -1246,11 +1257,14 @@ def splice_mcp(client, upstream, allow):
                                 session.get("id"),
                                 b"[" + refusal + b"]" if isinstance(message, list) else refusal)
                     if reply is not None:
-                        with write_lock:
-                            try:
-                                client.sendall(reply)
-                            except OSError:
+                        try:
+                            if not answer_locked(reply):
+                                # The client is flooding a body it is not
+                                # reading; the session is over.
+                                stop()
                                 return
+                        except OSError:
+                            return
                         continue
                 if finished.is_set():
                     return
@@ -1267,12 +1281,35 @@ def splice_mcp(client, upstream, allow):
     def send_locked(data):
         """Write to the client with the lock held for this write alone.
 
-        A stream stays open for the life of the session, so the lock is taken per
-        burst rather than around the pump: a refusal or an ordinary reply still
-        reaches the client while the stream is open.
+        For a stream's own head and chunks, which are the response in flight.
         """
         with write_lock:
             client.sendall(data)
+
+    def answer_locked(data):
+        """Answer the client, or hold the answer until the stream body ends.
+
+        The IDE's replies and the daemon's refusals cannot share the connection
+        with a response already in flight: HTTP/1.1 allows one at a time, so an
+        answer written into a stream's body is read as part of it and breaks the
+        stream. It waits in `owed` instead, and `release_owed` writes it once the
+        body's terminator frees the connection. False once `OWED_LIMIT` is
+        reached: the client that got there is not waiting for the answers anyway.
+        """
+        with write_lock:
+            if session.get("streaming"):
+                if len(owed) >= OWED_LIMIT:
+                    return False
+                owed.append(data)
+                return True
+            client.sendall(data)
+            return True
+
+    def release_owed():
+        """Write what was held while a stream body was in flight."""
+        with write_lock:
+            while owed and not session.get("streaming"):
+                client.sendall(owed.popleft())
 
     def pump_stream(head, headers):
         """Forward a stream as it arrives; True when its body ended.
@@ -1287,10 +1324,13 @@ def splice_mcp(client, upstream, allow):
         agent thinking looks like. The pump waits until the stream ends, the
         session is over, or the peer goes away.
         """
-        send_locked(head)
         chunked = b"chunked" in headers.get(b"transfer-encoding", b"").lower()
+        # Marked before the head goes out: a refusal written between the head and
+        # the first chunk would land in the body just as surely as one written
+        # after it.
         session["streaming"] = True
         try:
+            send_locked(head)
             while not finished.is_set():
                 if chunked:
                     frame = upstream_conn.read_chunk_frame()
@@ -1335,12 +1375,14 @@ def splice_mcp(client, upstream, allow):
                 if not is_bounded(head, headers):
                     if not pump_stream(head, headers):
                         return
+                    release_owed()
                     continue
                 body = read_body_or_lull(upstream_conn, headers)
                 if body is None:
                     return
                 replaced = filtered_response(head, body, allow) if allow is not None else None
-                send_locked(head + body if replaced is None else b"".join(replaced))
+                if not answer_locked(head + body if replaced is None else b"".join(replaced)):
+                    return
         except OSError:
             pass
         finally:
