@@ -18,12 +18,13 @@ They also defend a boundary that a hostile agent does not have to cross: the san
 the host's SSH agent, reaches a broader host and internet set than `kit/spec.yaml` names,
 and accepts any existing host path as a `mounts` entry from a directory the agent can write.
 
-Three of the four largest problems are runtime defaults this repo does not pass and cannot
-change from the kit. One is in `junie-sbx.sh`.
+The SSH agent is the one finding closed here, in `setup-junie-sbx.sh`
+([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)). The rest
+are runtime defaults this repo does not pass, plus the one `mounts` gap in `junie-sbx.sh`.
 
 ## Critical
 
-### 1. The host's SSH agent is forwarded in and can authenticate
+### 1. The host's SSH agent is forwarded in and can authenticate — fixed
 
 `SSH_AUTH_SOCK_GATEWAY` is set by the runtime, and `/run/ssh-agent.sock` inside the sandbox
 is that agent. It is mode `srw-rw-rw-`, so every uid in the sandbox can use it, not only
@@ -302,9 +303,12 @@ The secret separates one sandbox from another on the host, which is what it is f
 
 ## Priority
 
-1. **Suppress the forwarded SSH agent** for sandboxes that do not push, and scope a pushing
-   sandbox to a deploy key. This is the difference between reading a project and acting as
-   its owner.
+1. ~~**Suppress the forwarded SSH agent** for sandboxes that do not push, and scope a
+   pushing sandbox to a deploy key.~~ This is the difference between reading a project and
+   acting as its owner. `setup-junie-sbx.sh` now turns the daemon-level
+   `ssh.agentForwardingEnabled` off, since Junie reaches its providers over HTTPS through the
+   proxy and needs no agent. Confirmed here: unlinking the socket ends `ssh-add` and the
+   GitHub authentication it carried.
 2. **Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
    ancestors. This is the one escalation primitive in this repo.
 3. **Reconcile the egress policy with `spec.yaml`.** Either the policy is the intent and the
