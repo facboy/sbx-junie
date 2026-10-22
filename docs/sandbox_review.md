@@ -21,8 +21,9 @@ the agent can write.
 
 `setup-junie-sbx.sh` closes the first of the three
 ([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)), and
-`junie-sbx.sh` now closes the `mounts` one in finding 4. The egress finding stays open: sbx's own
-allow-set widens what `kit/spec.yaml` names, and nothing in this repo can narrow it.
+`junie-sbx.sh` now requires an operator's approval before it mounts a path from outside the
+project, which closes finding 4. The egress finding stays open: sbx's own allow-set widens what
+`kit/spec.yaml` names, and nothing in this repo can narrow it.
 
 ## Critical
 
@@ -188,15 +189,23 @@ per-project secret meaningful. Naming it would hand one sandbox every project's 
 with them every project's IDE, which removes the boundary the
 [per-project secret](#what-holds) draws.
 
-An entry now has to resolve under `$HOME` or the project, and is refused when it is `/`, `~`,
-either root itself, an ancestor of either, outside both, or the relay-secrets directory. The
-check runs on `os.path.realpath`, so a symlink out of the tree is judged by where it lands.
-Each refusal names the entry and stops the run before `sbx` is started. Eight cases in
-`tests/test_sbx_mounts.py` drive the script against a stub `sbx`: `/`, `~`, `~/git`, `/etc`, a
-symlink to `/etc` and `relay-secrets` are refused, while `~/data` and a project-relative
-`vendor:ro` still reach the command line. `README.md` and `sbx.example.toml` name the rule, and
-their example entry is a path under the home rather than `/srv/datasets`, which the check would
-now refuse.
+An entry outside the project now needs an approval the operator records once, and the record
+lives beside the relay secrets, which the sandbox never mounts. The run that grants it writes
+the path, keyed on the project, under `mount-approvals` there at mode `0700`/`0600`; later runs
+read it, so the sandbox cannot add a mount of its own. A path under the project needs nothing,
+since that is already the workspace. `os.path.realpath` decides both cases, so a symlink is
+judged by where it lands, and its target is what gets approved and mounted.
+
+The one thing no approval reaches is what holds the secrets and the approvals themselves: each of
+`relay-secrets` and `mount-approvals`, and any directory containing either, is refused. That is
+what makes `/` a refusal rather than an approval an operator might grant while thinking it
+harmless, since mounting it would hand the sandbox every project's secret.
+
+Ten cases in `tests/test_sbx_mounts.py` drive the script against a stub `sbx`: a project path
+mounts on its own; `~/data` is refused until approved, then mounts and is recorded at `0700`
+and `0600`; the record survives the next run; another project does not inherit it; a symlink to
+`/etc` is refused; and `relay-secrets`, its parent and `/` are refused even with the approval
+set. `README.md` and `sbx.example.toml` describe the approval and name where the record lives.
 
 ### 5. The per-project Junie home is a writable host path outside the workspace
 
@@ -329,7 +338,7 @@ The secret separates one sandbox from another on the host, which is what it is f
   the daemon.
 - **`relay-secrets` is not mounted into the sandbox**, which is what keeps finding 4 from
   being immediately exploitable.
-- **79 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
+- **81 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
   covers batch, notification, chunked, dispatcher and unparseable shapes.
 
 ## Priority
@@ -340,10 +349,10 @@ The secret separates one sandbox from another on the host, which is what it is f
    **Scope a pushing sandbox to a deploy key** is still open: the setting is all-or-nothing across
    the daemon, and no deploy key for that one sandbox is mounted.
 2. ~~**Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
-   ancestors.~~ — done in `junie-sbx.sh`: an entry has to resolve under `$HOME` or the project,
-   and `/`, `~`, either root, an ancestor of either, the relay secrets and any path outside both
-   are refused before `sbx` starts. `tests/test_sbx_mounts.py` drives all of them through a stub
-   `sbx`.
+   ancestors.~~ — done as an approval instead: a path under the project mounts on its own, one
+   outside it only once the operator records it, and the relay secrets are never mountable. An
+   entry outside the project is still a wide grant, so approve a directory rather than a tree;
+   `tests/test_sbx_mounts.py` drives the cases through a stub `sbx`.
 3. ~~**Reconcile the egress policy with `spec.yaml`.**~~ — done: `kit/README.md`, the spec's
    comment on the allowlist and the root README's pointer now say the list is added to sbx's own
    allow-set and the daemon's policy preset rather than replacing either, that `deny-all` is
@@ -365,7 +374,9 @@ The secret separates one sandbox from another on the host, which is what it is f
   `IJ_MCP_AUTH_TOKEN: <token>`. The CLI authenticates in a way not reproduced here, so the
   allowlist's behaviour under a direct dial is unproven in either direction, not shown safe.
 - **Whether `sbx` accepts a `mounts` entry of `/`.** `sbx` is absent from this image, so
-  finding 4 was measured as the argument `junie-sbx.sh` produces, not as a completed mount.
+  finding 4 was measured as the argument `junie-sbx.sh` produces, not as a completed mount. The
+  script no longer passes `/`, since mounting it would expose the relay secrets, so the question
+  is moot for this repo.
 - **Which layer grants each reachable host.** A sample of roughly twenty hosts was probed, and
   some answered for reasons this repo does not name. The layers could not be separated from
   inside the sandbox, where `sbx policy ls` is unavailable.

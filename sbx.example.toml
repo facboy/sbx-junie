@@ -9,9 +9,9 @@ pnpm = true
 
 # Extra host paths, appended to the mounts the script passes. Each appears in the
 # sandbox at its own path, `~/` is expanded, and a trailing `:ro` makes it
-# read-only. An entry has to resolve under your home directory or the project;
-# one naming `/`, `~`, an ancestor of either or a path outside both stops the
-# run. A path the host does not have stops the run too, so the entries below are
+# read-only. A path under the project needs no approval; one outside it is mounted
+# once you approve it for this project, which the run prints the command for. A
+# path the host does not have stops the run too, so the entries below are
 # commented out: uncomment the ones your host has.
 mounts = [
   # "~/data",

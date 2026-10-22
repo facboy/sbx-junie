@@ -84,7 +84,7 @@ switch_value() {
 # here since TOML has no shell to do it.
 read_config_file() {
 	python3 - "${CONFIG_FILE}" "${PWD}" "${CONFIG_HOME}" <<-'PY'
-		import os, sys, tomllib
+		import hashlib, json, os, sys, tomllib
 
 		try:
 		    with open(sys.argv[1], "rb") as handle:
@@ -109,24 +109,53 @@ read_config_file() {
 		                     % sys.argv[1])
 		    raise SystemExit(1)
 
-		# An entry names a host path this project may use, and the file naming it
-		# sits in the project the agent can write. With no root, one naming `/`
-		# or `~` hands the next run the host's tree, so an entry has to resolve
-		# inside the home directory or the project, and may not be either of
-		# those or a directory that holds one.
-		root_home = os.path.realpath(os.path.expanduser("~"))
+		# A `mounts` entry names a host path for the sandbox, and the file naming
+		# it sits in the project the agent can write. So an entry outside the
+		# project is a request the operator grants, not one this script can take
+		# on trust: it is allowed once the approval is recorded beside the relay
+		# secrets, where nothing in the sandbox can reach. An agent-added entry
+		# stops the run and names the command that grants it.
 		root_project = os.path.realpath(sys.argv[2])
-		# The relay secrets authorise each sandbox to its own project's IDE, so
-		# one named as a mount would hand the sandbox every project's secret.
+		approvals_dir = os.path.join(sys.argv[3], "mount-approvals")
+		approvals_path = os.path.join(
+		    approvals_dir, hashlib.md5(sys.argv[2].encode()).hexdigest() + ".json")
+		# The relay secrets authorise each sandbox to its own project's IDE, and
+		# the approvals here are what let a mount through, so neither is ever
+		# mountable -- nor is any directory that holds one. No approval lifts
+		# that, which is what stops `/` from reading as harmless.
 		secrets = os.path.realpath(os.path.join(sys.argv[3], "relay-secrets"))
+		private = (("the relay secrets", secrets),
+		           ("the mount approvals", approvals_dir))
 
 		def under(parent, child):
 		    """`child` is `parent`, or sits beneath it."""
 		    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
 
-		def above(parent, child):
-		    """`child` is an ancestor of `parent` and not `parent` itself."""
-		    return child != parent and parent.startswith(child.rstrip(os.sep) + os.sep)
+		def real(path):
+		    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+		approved = []
+		try:
+		    with open(approvals_path) as handle:
+		        approved = json.load(handle).get("mounts", [])
+		except (OSError, ValueError):
+		    approved = []
+
+		def record(path):
+		    """Add `path` to this project's recorded approvals."""
+		    os.makedirs(approvals_dir, mode=0o700, exist_ok=True)
+		    os.chmod(approvals_dir, 0o700)
+		    fd = os.open(approvals_path,
+		                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+		    with os.fdopen(fd, "w") as handle:
+		        json.dump({"project_path": sys.argv[2],
+		                   "mounts": sorted(set(approved + [path]))}, handle)
+		    os.chmod(approvals_path, 0o600)
+		    sys.stderr.write("junie-sbx: approved %s for this project\n" % path)
+
+		granted = [real(entry) for entry in
+		           os.environ.get("JUNIE_SBX_APPROVE_MOUNTS", "").split(os.pathsep)
+		           if entry.strip()]
 
 		for entry in mounts:
 		    # An entry naming no path is refused rather than reduced to the
@@ -163,19 +192,28 @@ read_config_file() {
 		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is no host path\n"
 		                         % (sys.argv[1], entry))
 		        raise SystemExit(1)
-		    # `realpath` after the existence check, so a symlink out of the two
-		    # roots is judged by where it lands, not by the name it was given.
-		    real = os.path.realpath(path)
-		    outside = not (under(root_home, real) or under(root_project, real))
-		    a_root = real == root_home or real == root_project
-		    an_ancestor = above(root_home, real) or above(root_project, real)
-		    if outside or a_root or an_ancestor or under(secrets, real):
-		        sys.stderr.write("junie-sbx: %s: mounts names %r, which has to resolve "
-		                         "under the home directory or the project, may not be "
-		                         "either one or hold it, and may not name the relay "
-		                         "secrets\n"
-		                         % (sys.argv[1], entry))
-		        raise SystemExit(1)
+		    # `realpath` after the existence check, so a symlink is judged by
+		    # where it lands rather than by the name it was given.
+		    landed = real(path)
+		    for label, kept in private:
+		        if under(kept, landed) or under(landed, kept):
+		            sys.stderr.write(
+		                "junie-sbx: %s: mounts names %r, which touches %s. That is "
+		                "never mounted, with or without an approval\n"
+		                % (sys.argv[1], entry, label))
+		            raise SystemExit(1)
+		    if not under(root_project, landed):
+		        if landed in granted and landed not in approved:
+		            record(landed)
+		            approved.append(landed)
+		        if landed not in approved:
+		            sys.stderr.write(
+		                "junie-sbx: %s: mounts names %r, which is outside the project "
+		                "and not approved for it.\n"
+		                "  Approve it once for this project with:\n"
+		                "    JUNIE_SBX_APPROVE_MOUNTS=%s junie-sbx.sh\n"
+		                % (sys.argv[1], entry, landed))
+		            raise SystemExit(1)
 		    print("mount=%s%s" % (path, ro))
 	PY
 }

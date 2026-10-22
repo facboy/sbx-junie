@@ -184,15 +184,29 @@ mounts = ["~/data", "~/datasets:ro"]
 
 They are appended to the ones above, at their host paths, and a trailing `:ro` makes one read-only
 as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a relative
-entry resolves against the project directory. An entry has to resolve under `$HOME` or the project:
-one naming `/`, `~`, an ancestor of either, or a path outside both stops the run and names it.
-That holds for a symlink too, since the check follows it. The file is agent-writable, so an entry
-it names is a request the operator's next run would otherwise grant. A `mounts` value that is not
-a list of strings, or an entry naming a path the host does not have, stops the run as well: `sbx`
-rejects a mount it cannot find, and reaching that refusal costs the rest of the startup. An entry
-that is only `:ro` stops the run too, naming the missing path before the marker. Since a trailing
-`:ro` always means read-only, a directory whose own name ends in one cannot be mounted; an entry
-naming only such a directory stops the run rather than mounting the path the marker leaves behind.
+entry resolves against the project directory. A path under the project needs nothing: it is already
+the workspace.
+
+An entry naming a path outside the project is mounted only after you approve it once, because the
+file naming it is one the agent can edit. An unapproved entry stops the run and prints the command
+that grants it:
+
+```console
+JUNIE_SBX_APPROVE_MOUNTS=~/datasets ~/git/sbx-junie/junie-sbx.sh
+```
+
+That run records the path against the project, under
+`${XDG_CONFIG_HOME:-~/.config}/junie-sbx/mount-approvals`, which the sandbox never mounts, so later
+runs need no variable and the agent cannot grant itself anything. Approvals are per project, and a
+symlink is approved as the path it resolves to. That record and the relay secrets are never
+mountable, and neither is any directory holding them, whatever is approved.
+
+A `mounts` value that is not a list of strings, or an entry naming a path the host does not have,
+stops the run as well: `sbx` rejects a mount it cannot find, and reaching that refusal costs the
+rest of the startup. An entry that is only `:ro` stops the run too, naming the missing path before
+the marker. Since a trailing `:ro` always means read-only, a directory whose own name ends in one
+cannot be mounted; an entry naming only such a directory stops the run rather than mounting the
+path the marker leaves behind.
 
 [`sbx.example.toml`](sbx.example.toml) holds every setting, commented, as a starting point: copy it
 to `<project>/.junie/sbx.toml`.
