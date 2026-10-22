@@ -14,21 +14,22 @@ grants come from the runtime beneath this repo rather than from the repo.
 
 The per-project relay secret, the fail-closed record permissions, the containment check on
 the resolved project path and the MCP tool allowlist are all correct in the shapes tested.
-They also defend a boundary that a hostile agent does not have to cross: the sandbox forwards
-the host's SSH agent, reaches a broader host and internet set than `kit/spec.yaml` names,
-and accepts any existing host path as a `mounts` entry from a directory the agent can write.
+They also defend a boundary that a hostile agent does not have to cross. At `24ec31f` the
+sandbox forwarded the host's SSH agent, reached a broader host and internet set than
+`kit/spec.yaml` names, and accepted any existing host path as a `mounts` entry from a directory
+the agent can write.
 
-The SSH agent is the one finding closed here, in `setup-junie-sbx.sh`
-([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)). The rest
-are runtime defaults this repo does not pass, plus the one `mounts` gap in `junie-sbx.sh`.
+`setup-junie-sbx.sh` closes the first of the three
+([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)). The other two
+stay open: the runtime's pre-approved egress set is wider than `kit/spec.yaml`, and
+`junie-sbx.sh` confines no `mounts` entry.
 
 ## Critical
 
 ### 1. The host's SSH agent is forwarded in and can authenticate — fixed
 
-`SSH_AUTH_SOCK_GATEWAY` is set by the runtime, and `/run/ssh-agent.sock` inside the sandbox
-is that agent. It is mode `srw-rw-rw-`, so every uid in the sandbox can use it, not only
-`agent`.
+The runtime set `SSH_AUTH_SOCK_GATEWAY`, and `/run/ssh-agent.sock` inside the sandbox was that
+agent. It was mode `srw-rw-rw-`, so every uid in the sandbox could use it, not only `agent`.
 
 The private keys themselves are absent — `/home/chrisng/.ssh` does not exist in the sandbox —
 which is not a mitigation. An agent that signs is the identity for every service that trusts
@@ -55,14 +56,17 @@ $ git push --dry-run ssh://git@ssh.github.com:443/facboy/sbx-junie.git \
  * [new branch]      HEAD -> probe-does-not-exist
 ```
 
-Anything the agent runs reaches this: a `postinstall`, a test harness, a dependency's setup
+Anything the agent ran reached this: a `postinstall`, a test harness, a dependency's setup
 script, or a prompt-injected instruction. The dry run performed no write; the capability it
 demonstrates is a push to any repository the user can push to, from code the user never
 reviewed.
 
 This is the widest grant in the sandbox because it is the user's own identity rather than a
-resource scoped to one project. A sandbox that has no reason to push wants the agent
-suppressed entirely; one that does wants a deploy key for the project it holds.
+resource scoped to one project. `setup-junie-sbx.sh` turns the daemon-level
+`ssh.agentForwardingEnabled` off and restarts the daemon, so no sandbox the daemon serves gets
+the forward. Removing the socket by hand has the same effect: `ssh-add` and the GitHub
+authentication it carried both stop. A sandbox that does need to push wants its own deploy key
+for the project it holds.
 
 ### 2. Egress reaches hosts `kit/spec.yaml` says are not reachable
 
@@ -102,8 +106,8 @@ reaches the same conclusion: TLS to `140.82.121.4` with `github.com` as the serv
 completes and returns `200`, while `93.184.216.34` with `example.com` fails the handshake.
 
 The consequence is that the agent can fetch and run third-party code from PyPI, npm and
-GitHub, and `docker run` pulls from Docker Hub (verified with `alpine`). Combined with
-finding 1, GitHub is ingress and a verified exfiltration path in one host.
+GitHub, and `docker run` pulls from Docker Hub (verified with `alpine`). GitHub stays reachable
+over HTTPS after finding 1's fix, which removes the agent push but not the egress.
 
 The effective policy is a pre-approved set wider than this kit's list, so the spec's
 "no install host" reasoning describes a narrower boundary than the one in force. Either the
@@ -303,12 +307,11 @@ The secret separates one sandbox from another on the host, which is what it is f
 
 ## Priority
 
-1. ~~**Suppress the forwarded SSH agent** for sandboxes that do not push, and scope a
-   pushing sandbox to a deploy key.~~ This is the difference between reading a project and
-   acting as its owner. `setup-junie-sbx.sh` now turns the daemon-level
-   `ssh.agentForwardingEnabled` off, since Junie reaches its providers over HTTPS through the
-   proxy and needs no agent. Confirmed here: unlinking the socket ends `ssh-add` and the
-   GitHub authentication it carried.
+1. ~~**Suppress the forwarded SSH agent** for sandboxes that do not push.~~ — done:
+   `setup-junie-sbx.sh` turns the daemon-level `ssh.agentForwardingEnabled` off and restarts the
+   daemon, since Junie reaches its providers over HTTPS through the proxy and needs no agent.
+   **Scope a pushing sandbox to a deploy key** is still open: the setting is all-or-nothing across
+   the daemon, and no deploy key for that one sandbox is mounted.
 2. **Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
    ancestors. This is the one escalation primitive in this repo.
 3. **Reconcile the egress policy with `spec.yaml`.** Either the policy is the intent and the

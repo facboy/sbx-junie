@@ -34,15 +34,15 @@ home as a workspace without write access. Re-running it is a no-op. A host witho
 here with a message naming it, before anything is created; `junie-sbx.sh` refuses an empty view, so
 an unfinished setup is reported rather than mounted.
 
-It also turns SSH agent forwarding off. That is a daemon-level setting: the runtime forwards your
-agent into every sandbox it starts, and a kit cannot refuse it — the v2 spec has no `sshAgent`
+It also turns SSH agent forwarding off. The setting is daemon-level, so a kit cannot refuse it:
+the runtime forwards your agent into every sandbox it starts, and the v2 spec has no `sshAgent`
 field. An agent that signs is your identity wherever your keys are trusted, so anything the
-sandbox runs inherits a push: a dependency's `postinstall`, a test harness, or a command a
-prompt talked the agent into. Junie needs no SSH here, since its credentials reach the providers
-over HTTPS through the proxy. The step restarts the daemon, because the value reaches a sandbox
-that already exists only on a restart. `JUNIE_SBX_KEEP_SSH_AGENT=1` skips it, and
-`sbx settings set ssh.agentForwardingEnabled true` puts it back for the other agent sandboxes the
-daemon serves.
+sandbox runs inherits a push — a dependency's `postinstall`, a test harness, a command a prompt
+talked the agent into. Junie needs no SSH here, since its credentials reach the providers over
+HTTPS through the proxy. The step runs only while `sbx` reports the setting on, and restarts the
+daemon, since a sandbox that already exists keeps the agent it was started with. It prints the
+`sbx settings set ssh.agentForwardingEnabled true` that turns the setting back on for every
+sandbox the daemon serves; `JUNIE_SBX_KEEP_SSH_AGENT=1` skips the step.
 
 `junie-sbx.sh` sets up each project's Junie home at the start of every run — the three read-only
 links and the host's sessions — without prompting, so it works unattended and a host session

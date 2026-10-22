@@ -42,20 +42,17 @@ if ! command -v fuse-overlayfs > /dev/null 2>&1 && ! sudo -n true 2> /dev/null; 
   echo "  so the sandbox will not reuse your host uv cache or pnpm store." >&2
 fi
 
-# SSH agent forwarding is a daemon-level setting, not a per-sandbox or per-kit
-# one: the runtime forwards your agent into every sandbox it starts, and the v2
-# spec has no `sshAgent` field to refuse it with. An agent that signs is your
-# identity wherever your keys are trusted, so anything the sandbox runs -- a
+# SSH agent forwarding is daemon-level, not per-sandbox or per-kit: the runtime
+# forwards your agent into every sandbox it starts, and the v2 spec has no
+# `sshAgent` field to refuse it with. An agent that signs is your identity
+# wherever your keys are trusted, so anything the sandbox runs -- a
 # dependency's postinstall, a test harness, a command a prompt talked the agent
-# into -- inherits a push. Junie needs no SSH here (its credentials reach the
-# providers over HTTPS through the proxy), so the setting goes off while it is
-# on. The daemon is restarted because the value reaches a sandbox that already
-# exists only when the daemon restarts, and a running sandbox keeps the agent it
-# was started with.
-#
-# Being daemon-level, this also stops forwarding into other agent sandboxes on
-# the host. A host that wants the agent back turns the setting on again; set
-# JUNIE_SBX_KEEP_SSH_AGENT=1 to leave it alone and accept the reach instead.
+# into -- inherits a push. Junie needs no SSH here: its credentials reach the
+# providers over HTTPS through the proxy. The daemon is restarted, since a
+# sandbox that already exists keeps the agent it was started with. Being
+# daemon-level, this also stops forwarding into other agent sandboxes on the
+# host; a host that wants the agent back turns the setting on again.
+# JUNIE_SBX_KEEP_SSH_AGENT=1 leaves it alone and accepts the reach instead.
 if [ "${JUNIE_SBX_KEEP_SSH_AGENT:-}" != 1 ] && command -v sbx > /dev/null 2>&1; then
   if [ "$(sbx settings get ssh.agentForwardingEnabled 2> /dev/null)" = true ]; then
     if sbx settings set ssh.agentForwardingEnabled false > /dev/null 2>&1; then
