@@ -20,9 +20,9 @@ sandbox forwarded the host's SSH agent, reached a broader host and internet set 
 the agent can write.
 
 `setup-junie-sbx.sh` closes the first of the three
-([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)). The other two
-stay open: sbx's own egress allow-set widens what `kit/spec.yaml` names, and `junie-sbx.sh`
-confines no `mounts` entry.
+([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)), and
+`junie-sbx.sh` now closes the `mounts` one in finding 4. The egress finding stays open: sbx's own
+allow-set widens what `kit/spec.yaml` names, and nothing in this repo can narrow it.
 
 ## Critical
 
@@ -157,11 +157,11 @@ comment on the allowlist name both ports now.
 
 ## High
 
-### 4. `mounts` accepts any existing host path, including `/`
+### 4. `mounts` accepts any existing host path, including `/` — fixed
 
-`junie-sbx.sh` reduces a `mounts` entry to an absolute path and checks three things: it is not
-empty, it holds no newline, and `os.path.exists`. Nothing confines it to the project, `$HOME`
-or any other root, and nothing denies `/`.
+`junie-sbx.sh` reduced a `mounts` entry to an absolute path and checked three things: it was not
+empty, it held no newline, and `os.path.exists`. Nothing confined it to the project, `$HOME`
+or any other root, and nothing denied `/`.
 
 Driven against a stub `sbx` with a fixture home:
 
@@ -177,7 +177,7 @@ $ junie-sbx.sh
 `~` is the fixture home, expanded to an absolute path; `/` is passed unchanged.
 
 The project directory is agent-writable by design, and `.junie/sbx.toml` sits in it, so this
-is a two-run primitive:
+was a two-run primitive:
 
 1. The agent writes `.junie/sbx.toml` naming `/`, `~`, `~/.ssh:ro`, or
    `~/.config/junie-sbx/relay-secrets`.
@@ -188,9 +188,15 @@ per-project secret meaningful. Naming it would hand one sandbox every project's 
 with them every project's IDE, which removes the boundary the
 [per-project secret](#what-holds) draws.
 
-A `mounts` entry should resolve under `$HOME` or the project and be refused when it is `/`,
-`~`, an ancestor of the project, or outside both roots. The operator names these entries
-once; the agent can rewrite them at any time.
+An entry now has to resolve under `$HOME` or the project, and is refused when it is `/`, `~`,
+either root itself, an ancestor of either, outside both, or the relay-secrets directory. The
+check runs on `os.path.realpath`, so a symlink out of the tree is judged by where it lands.
+Each refusal names the entry and stops the run before `sbx` is started. Eight cases in
+`tests/test_sbx_mounts.py` drive the script against a stub `sbx`: `/`, `~`, `~/git`, `/etc`, a
+symlink to `/etc` and `relay-secrets` are refused, while `~/data` and a project-relative
+`vendor:ro` still reach the command line. `README.md` and `sbx.example.toml` name the rule, and
+their example entry is a path under the home rather than `/srv/datasets`, which the check would
+now refuse.
 
 ### 5. The per-project Junie home is a writable host path outside the workspace
 
@@ -323,7 +329,7 @@ The secret separates one sandbox from another on the host, which is what it is f
   the daemon.
 - **`relay-secrets` is not mounted into the sandbox**, which is what keeps finding 4 from
   being immediately exploitable.
-- **71 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
+- **79 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
   covers batch, notification, chunked, dispatcher and unparseable shapes.
 
 ## Priority
@@ -333,8 +339,11 @@ The secret separates one sandbox from another on the host, which is what it is f
    daemon, since Junie reaches its providers over HTTPS through the proxy and needs no agent.
    **Scope a pushing sandbox to a deploy key** is still open: the setting is all-or-nothing across
    the daemon, and no deploy key for that one sandbox is mounted.
-2. **Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
-   ancestors. This is the one escalation primitive in this repo.
+2. ~~**Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
+   ancestors.~~ — done in `junie-sbx.sh`: an entry has to resolve under `$HOME` or the project,
+   and `/`, `~`, either root, an ancestor of either, the relay secrets and any path outside both
+   are refused before `sbx` starts. `tests/test_sbx_mounts.py` drives all of them through a stub
+   `sbx`.
 3. ~~**Reconcile the egress policy with `spec.yaml`.**~~ — done: `kit/README.md`, the spec's
    comment on the allowlist and the root README's pointer now say the list is added to sbx's own
    allow-set and the daemon's policy preset rather than replacing either, that `deny-all` is

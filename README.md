@@ -179,17 +179,20 @@ as on, which is the default.
 The same file adds host paths to the mounts the script passes:
 
 ```toml
-mounts = ["~/data", "/srv/datasets:ro"]
+mounts = ["~/data", "~/datasets:ro"]
 ```
 
 They are appended to the ones above, at their host paths, and a trailing `:ro` makes one read-only
 as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a relative
-entry resolves against the project directory. A `mounts` value that is not a list of strings, or an
-entry naming a path the host does not have, stops the run and names it: `sbx` rejects a mount it
-cannot find, and reaching that refusal costs the rest of the startup. An entry that is only `:ro`
-stops the run too, naming the missing path before the marker. Since a trailing `:ro` always means
-read-only, a directory whose own name ends in one cannot be mounted; an entry naming only such a
-directory stops the run rather than mounting the path the marker leaves behind.
+entry resolves against the project directory. An entry has to resolve under `$HOME` or the project:
+one naming `/`, `~`, an ancestor of either, or a path outside both stops the run and names it.
+That holds for a symlink too, since the check follows it. The file is agent-writable, so an entry
+it names is a request the operator's next run would otherwise grant. A `mounts` value that is not
+a list of strings, or an entry naming a path the host does not have, stops the run as well: `sbx`
+rejects a mount it cannot find, and reaching that refusal costs the rest of the startup. An entry
+that is only `:ro` stops the run too, naming the missing path before the marker. Since a trailing
+`:ro` always means read-only, a directory whose own name ends in one cannot be mounted; an entry
+naming only such a directory stops the run rather than mounting the path the marker leaves behind.
 
 [`sbx.example.toml`](sbx.example.toml) holds every setting, commented, as a starting point: copy it
 to `<project>/.junie/sbx.toml`.
@@ -339,8 +342,8 @@ The sandbox's watcher picks the work up within a tick, without restarting the sa
 ## Tests
 
 The daemon's parsers and allowlist, the byte splice both relay halves carry, the endpoint's
-bind, and the terminal filter's splitting are covered by `tests/`, which needs nothing beyond
-`python3`:
+bind, the terminal filter's splitting, and `junie-sbx.sh`'s handling of `mounts` entries are
+covered by `tests/`, which needs nothing beyond `python3`:
 
 ```console
 python3 -B -m unittest discover -s tests

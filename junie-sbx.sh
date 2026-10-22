@@ -83,7 +83,7 @@ switch_value() {
 # loaded. A mount is a host path, read-only with `:ro`, and `~/` is expanded
 # here since TOML has no shell to do it.
 read_config_file() {
-	python3 - "${CONFIG_FILE}" <<-'PY'
+	python3 - "${CONFIG_FILE}" "${PWD}" "${CONFIG_HOME}" <<-'PY'
 		import os, sys, tomllib
 
 		try:
@@ -108,6 +108,26 @@ read_config_file() {
 		    sys.stderr.write("junie-sbx: %s: mounts wants a list of host paths\n"
 		                     % sys.argv[1])
 		    raise SystemExit(1)
+
+		# An entry names a host path this project may use, and the file naming it
+		# sits in the project the agent can write. With no root, one naming `/`
+		# or `~` hands the next run the host's tree, so an entry has to resolve
+		# inside the home directory or the project, and may not be either of
+		# those or a directory that holds one.
+		root_home = os.path.realpath(os.path.expanduser("~"))
+		root_project = os.path.realpath(sys.argv[2])
+		# The relay secrets authorise each sandbox to its own project's IDE, so
+		# one named as a mount would hand the sandbox every project's secret.
+		secrets = os.path.realpath(os.path.join(sys.argv[3], "relay-secrets"))
+
+		def under(parent, child):
+		    """`child` is `parent`, or sits beneath it."""
+		    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
+
+		def above(parent, child):
+		    """`child` is an ancestor of `parent` and not `parent` itself."""
+		    return child != parent and parent.startswith(child.rstrip(os.sep) + os.sep)
+
 		for entry in mounts:
 		    # An entry naming no path is refused rather than reduced to the
 		    # working directory, which is what `abspath` would make of it.
@@ -141,6 +161,19 @@ read_config_file() {
 		        path, ro = stripped_path, ":ro"
 		    if "\n" in entry or not os.path.exists(path):
 		        sys.stderr.write("junie-sbx: %s: mounts names %r, which is no host path\n"
+		                         % (sys.argv[1], entry))
+		        raise SystemExit(1)
+		    # `realpath` after the existence check, so a symlink out of the two
+		    # roots is judged by where it lands, not by the name it was given.
+		    real = os.path.realpath(path)
+		    outside = not (under(root_home, real) or under(root_project, real))
+		    a_root = real == root_home or real == root_project
+		    an_ancestor = above(root_home, real) or above(root_project, real)
+		    if outside or a_root or an_ancestor or under(secrets, real):
+		        sys.stderr.write("junie-sbx: %s: mounts names %r, which has to resolve "
+		                         "under the home directory or the project, may not be "
+		                         "either one or hold it, and may not name the relay "
+		                         "secrets\n"
 		                         % (sys.argv[1], entry))
 		        raise SystemExit(1)
 		    print("mount=%s%s" % (path, ro))
