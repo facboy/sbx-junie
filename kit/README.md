@@ -182,6 +182,14 @@ in the image rather than fetched at run time, so they add no host here either
 ([Base image](#base-image)). `junie.jetbrains.com` stays in the allowlist regardless, because it
 is also the `junie` credential's inject domain above.
 
+That list is this kit's addition to what sbx already allows, not the whole outbound surface. sbx
+carries an allow-set of its own — the image it boots and any kit it pulls come from registries no
+`permissions.network.allow` here names — and its policy preset contributes more;
+`permissions.network.allow` opens what the kit needs on top of both rather than replacing either.
+The surface in force is the union minus any deny, and `sbx policy ls` reports it.
+`sbx policy init deny-all` is the posture where this list is the whole surface, which is the one
+the upstream kits are written for.
+
 Junie's own multi-channel switching (`junie --eap`, `--nightly`, `--experimental`) is outside this kit's supported
 surface: it fetches and installs another channel's build on demand, and that build's hosts are not part of this
 allowlist.

@@ -92,8 +92,9 @@ The host paths it passes:
 A project adds more of its own through `.junie/sbx.toml`
 ([Mounting more of the host](#mounting-more-of-the-host)).
 
-Auth goes through the sandbox proxy; the credentials the kit declares, and why the allowlist names
-no install host, are in [`kit/README.md`](kit/README.md#how-auth-works).
+Auth goes through the sandbox proxy. The credentials the kit declares, and how its allowlist
+composes with the daemon's own policy rather than replacing it, are in
+[`kit/README.md`](kit/README.md#how-auth-works).
 
 ## Your uv and pnpm environments
 

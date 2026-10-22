@@ -21,8 +21,8 @@ the agent can write.
 
 `setup-junie-sbx.sh` closes the first of the three
 ([finding 1](#1-the-hosts-ssh-agent-is-forwarded-in-and-can-authenticate--fixed)). The other two
-stay open: the runtime's pre-approved egress set is wider than `kit/spec.yaml`, and
-`junie-sbx.sh` confines no `mounts` entry.
+stay open: sbx's own egress allow-set widens what `kit/spec.yaml` names, and `junie-sbx.sh`
+confines no `mounts` entry.
 
 ## Critical
 
@@ -68,7 +68,7 @@ the forward. Removing the socket by hand has the same effect: `ssh-add` and the 
 authentication it carried both stop. A sandbox that does need to push wants its own deploy key
 for the project it holds.
 
-### 2. Egress reaches hosts `kit/spec.yaml` says are not reachable
+### 2. Egress reaches hosts `kit/spec.yaml` does not name
 
 `permissions.network.allow` names seven provider hosts and `localhost:27183`.
 `kit/README.md` states that `github.com`, `raw.githubusercontent.com` and
@@ -109,10 +109,19 @@ The consequence is that the agent can fetch and run third-party code from PyPI, 
 GitHub, and `docker run` pulls from Docker Hub (verified with `alpine`). GitHub stays reachable
 over HTTPS after finding 1's fix, which removes the agent push but not the egress.
 
-The effective policy is a pre-approved set wider than this kit's list, so the spec's
-"no install host" reasoning describes a narrower boundary than the one in force. Either the
-policy is the intent and the spec and `kit/README.md` are wrong about it, or the policy is
-wider than intended and the approval queue is the place to narrow it.
+Some of those hosts are not this kit's grant and not anyone's approval: sbx bakes URLs of its own
+into the runtime, and a host in that set answers whatever kit is loaded. `docker run alpine`
+succeeded inside the sandbox although `kit/spec.yaml` names no registry host, so Docker Hub was
+reachable without this repo naming it. `permissions.network.allow` is added on top of that set,
+and on top of the host's policy preset, rather than replacing either, so a kit can neither grant
+nor withdraw those hosts. Which measured row came from sbx, from the preset, or from this kit
+could not be separated from inside the sandbox, where `sbx policy ls` is unavailable.
+
+So this is a documentation gap rather than a spec that got its own list wrong. "No install host"
+holds for `kit/spec.yaml` and says nothing about what the list sits on, which is why the boundary
+in force is wider than reading the spec suggests. `deny-all` is the posture where the declared
+list is the whole surface; a host that reads this allowlist as exhaustive without applying that
+policy is reading a boundary it does not have.
 
 ### 3. The host-loopback narrowing is two ports, not one
 
@@ -314,10 +323,11 @@ The secret separates one sandbox from another on the host, which is what it is f
    the daemon, and no deploy key for that one sandbox is mounted.
 2. **Confine `mounts`** to paths under `$HOME` or the project, refusing `/`, `~` and
    ancestors. This is the one escalation primitive in this repo.
-3. **Reconcile the egress policy with `spec.yaml`.** Either the policy is the intent and the
-   spec and `kit/README.md` overstate the narrowing, or the pre-approved set is wider than
-   intended and the approval queue is where to narrow it. Document the queue; a `403` that
-   names `sbx policy approval ls` is undiscoverable from the README.
+3. ~~**Reconcile the egress policy with `spec.yaml`.**~~ — done: `kit/README.md`, the spec's
+   comment on the allowlist and the root README's pointer now say the list is added to sbx's own
+   allow-set and the daemon's policy preset rather than replacing either, that `deny-all` is
+   where it is the whole surface, and that `sbx policy ls` reports the composition. The `403`
+   also names `sbx policy approval ls`, which the README does not.
 4. **Narrow the `~/.junie` view** to `AGENTS.md`, `docs/`, `tools/` and this project's
    sessions. Other projects' transcripts are not part of this project's sandbox.
 5. **Filter the RPC relay** the way the MCP relay is filtered, or state that it is
@@ -335,6 +345,6 @@ The secret separates one sandbox from another on the host, which is what it is f
   allowlist's behaviour under a direct dial is unproven in either direction, not shown safe.
 - **Whether `sbx` accepts a `mounts` entry of `/`.** `sbx` is absent from this image, so
   finding 4 was measured as the argument `junie-sbx.sh` produces, not as a completed mount.
-- **The size of the runtime's pre-approved egress set.** A sample of roughly twenty hosts was
-  probed; the policy behind them was not enumerated, since `sbx policy ls` is unavailable
-  inside the sandbox.
+- **Which layer grants each reachable host.** A sample of roughly twenty hosts was probed, and
+  some answered for reasons this repo does not name. The layers could not be separated from
+  inside the sandbox, where `sbx policy ls` is unavailable.

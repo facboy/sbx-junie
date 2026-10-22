@@ -22,6 +22,8 @@ agentInstructions:
 permissions:
   network:
     allow:
+      # This list is added to the runtime's own allow-set and the host's policy
+      # preset; deny-all is where it is the whole surface.
       # Use the host user's junie install, and the spec also sets
       # JUNIE_SKIP_UPDATE_CHECK=1, so the installed binary never checks for
       # or stages a runtime update. That drops github.com,
