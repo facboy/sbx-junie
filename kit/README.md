@@ -63,10 +63,15 @@ The two are joined by a one-line preamble: the sandbox endpoint opens each conne
 project's digest and the secret `junie-sbx.sh` provisioned for that project, and the host daemon
 answers by resolving that digest against the host's instance files — after checking the secret
 against the project the digest resolves to. The IDE's own ephemeral port is therefore never dialled
-from the sandbox and never appears in the allowlist — the sandbox only ever dials the daemon's fixed
-port. That is what makes `localhost:27183` in `permissions.network.allow` a real narrowing rather
-than an opening onto every host port, and it means an IDE that restarts on a new port keeps working:
-the daemon re-resolves the port on every connection.
+from the sandbox and never appears in the allowlist — the relay only ever dials the daemon's fixed
+port. That is what `localhost:27183` in `permissions.network.allow` grants, and an IDE that
+restarts on a new port keeps working because the daemon re-resolves the port on every connection.
+
+It is not the only host port the sandbox reaches. The runtime grants the host's model server at
+`11434` as well, so a pinned `ollama` provider can answer, and that grant is not this kit's: any
+process in the sandbox can dial it. Both ports are fixed, so the surface is two named ports rather
+than every host port — but a reader who takes `localhost:27183` for the whole of it is reading a
+narrower boundary than the one in force.
 
 Loopback is shared with every other local process, so the port alone is no boundary: the secret is,
 and it is per project. A connection naming another project's digest — including another sandbox's —
@@ -197,7 +202,8 @@ allowlist.
 `localhost:27183` is in the allowlist for [the relay](#relay-architecture), not
 for auth: the proxy classifies a dial to `host.docker.internal:<port>` as `localhost:<port>`, so that entry is
 what lets the sandbox-side relay reach `junie-ide-relayd` on the host. It names the daemon's fixed port, not the
-IDE's.
+IDE's. It is also not the only host port reachable: the runtime grants `11434` for the pinned
+`ollama` provider, which no entry here names.
 
 ### Anthropic: API key only, no Claude subscription
 

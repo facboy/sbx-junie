@@ -45,10 +45,10 @@ permissions:
       # `junie-ide-relayd` daemon, which rebinds every IDE onto one fixed
       # host loopback port -- the port below. The runtime classifies a dial
       # to host.docker.internal:<port> as localhost:<port> and enforces the
-      # port, which is what makes this a real narrowing: the IDE plugin's own
-      # ephemeral port is never named here and is not reachable from the
-      # sandbox. See "Relay architecture" in README.md, and the host steps in
-      # ../README.md.
+      # port, so the IDE plugin's own ephemeral port stays unnamed and
+      # unreachable. It is not the only host port in force: the runtime grants
+      # 11434 for the pinned ollama provider, outside this list. See "Relay
+      # architecture" in README.md, and the host steps in ../README.md.
       - localhost:27183
 credentials:
   - service: anthropic

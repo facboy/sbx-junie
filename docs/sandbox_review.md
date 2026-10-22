@@ -123,25 +123,37 @@ in force is wider than reading the spec suggests. `deny-all` is the posture wher
 list is the whole surface; a host that reads this allowlist as exhaustive without applying that
 policy is reading a boundary it does not have.
 
-### 3. The host-loopback narrowing is two ports, not one
+### 3. The host-loopback narrowing is two ports, not one — documented
 
-`kit/README.md` argues that naming one fixed port makes `localhost:27183` a narrowing rather
+`kit/README.md` argued that naming one fixed port made `localhost:27183` a narrowing rather
 than an opening onto every host port. The relay port is indeed the only one the *kit*
 allowlists, and the IDE's ephemeral port is correctly never dialled. A second host service
-answers anyway:
+answers anyway, and nothing else does:
 
 ```console
-$ # 11434, the host's model server, named by ANTHROPIC_BASE_URL and OPENAI_BASE_URL
-POST /api/tags HTTP/1.0 → HTTP/1.0 200 OK
+$ # 11434, the host's model server, no preamble needed
+GET / → 200 OK, "Ollama is running"
 
-$ # 27183, the relay
+$ # 27183, the relay, which answers one line to a well-formed preamble
 JUNIE-RELAY 1 health\n → JUNIE-RELAY 1 ok 3
+GET / → connection closed unread; the sandbox proxy reports 500 for that
+
+$ # every other port tried: the IDE's 41832, the MCP mirror at 64562, 3000, 5000, 8080, 9999
+curl GET / → 403, "Approval required for localhost:<port>."
+bare socket → connection accepted, then closed with no reply
 ```
 
-The IDE's port at `41832` and the MCP mirror at `64562` do not answer, so the relay's claim
-about *the IDE* holds. The claim about host ports in general does not: the model server is a
-second host endpoint reachable from the sandbox, granted by the runtime so the pinned
-`ollama` provider works. It is reachable by anything in the sandbox, not only the CLI.
+The gate is per port rather than per host: an unlisted port is refused — a socket that connects
+and is closed unread, which `curl` reports as the `403` and its approval message — and the two
+that answer are the two named somewhere in the composition: `27183` by this kit, `11434` by the
+runtime so the pinned `ollama` provider works. The IDE's own port and the MCP mirror are
+correctly absent from both.
+
+So the narrowing holds where it matters — the sandbox cannot dial an arbitrary host port — while
+`kit/README.md`'s "one fixed port" described half of it. The model server is the other half, and
+anything in the sandbox can reach it, not only the CLI. It comes from the runtime rather than from
+any entry in this repo, so a kit's allowlist cannot withdraw it; `kit/README.md` and the spec's
+comment on the allowlist name both ports now.
 
 ## High
 
