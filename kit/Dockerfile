@@ -32,17 +32,21 @@ USER root
 
 # Playwright is installed only to run its own dependency resolver, which knows the
 # package names for each distro and so is not a list to keep by hand here. It
-# covers the libraries the browsers link, the DRI drivers headless WebKit loads by
-# path for EGL, and the fonts fontconfig enumerates. `install-deps` fetches no
-# browser, which is the point: the browsers come from the mount, and `--with-deps`
-# would download them too. It shells out to `apt-get install` with no frontend of
-# its own and there is no tty here, so the export has to cover it. Playwright and
-# the indexes are removed in the same layer, leaving what it pulled and nothing
-# else.
+# covers the libraries the browsers link and the DRI drivers headless WebKit loads
+# by path for EGL. `install-deps` fetches no browser, which is the point: the
+# browsers come from the mount, and `--with-deps` would download them too. It shells
+# out to `apt-get install` with no frontend of its own and there is no tty here, so
+# the export has to cover it. Playwright and the indexes are removed in the same
+# layer, leaving what it pulled and nothing else.
+#
+# `fonts-dejavu-core` is named rather than left to that resolver, which brings fonts
+# of its own choosing: `monospace` has to resolve to a font carrying the box-drawing
+# and block glyphs a terminal UI draws, and DejaVu is the usual fallback.
 RUN export DEBIAN_FRONTEND=noninteractive \
  && apt-get update \
  && npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
  && npx playwright install-deps chromium firefox webkit \
+ && apt-get install -y --no-install-recommends fonts-dejavu-core \
  && npm uninstall -g playwright \
  && npm cache clean --force \
  && rm -rf /var/lib/apt/lists/*

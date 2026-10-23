@@ -244,7 +244,9 @@ supply what loads by path rather than by soname, which is what ruled the earlier
 gather-them-off-the-host approach out ([Browser libraries](../README.md#browser-libraries)). Those
 libraries are installed at image build time from Playwright's own dependency list, so they add no host
 to the runtime allowlist either. The engine adds none, since nothing here installs through it at
-create time.
+create time. `fonts-dejavu-core` is installed beside that list: the base ships no fonts, and the
+resolver's own set leaves `monospace` resolving to a font without the box-drawing glyphs the TUI
+draws ([Browser libraries](../README.md#browser-libraries)).
 
 `JUNIE_SKIP_UPDATE_CHECK=1`, set by the spec's `environment`, seals the installed binary's own
 runtime auto-update check. Without it the shim polls for and stages a newer build of the channel it

@@ -135,6 +135,11 @@ DRI drivers headless WebKit renders through, without which it aborts with
 `Could not create EGL display: no supported platform available`, and the fonts fontconfig
 enumerates, without which text measures as zero-width.
 
+`fonts-dejavu-core` is installed beside that set rather than left to it. The base image ships no
+fonts at all, and the resolver's own choices leave the generic `monospace` family resolving to a
+font without the box-drawing and block glyphs a terminal UI draws; with DejaVu it resolves there,
+and the TUI's borders render as lines instead of fallback boxes.
+
 Consequences worth knowing:
 
 - The image is what makes the browsers work, so a sandbox on a bare template has none of this and
