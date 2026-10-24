@@ -70,8 +70,7 @@ restarts on a new port keeps working because the daemon re-resolves the port on 
 It is not the only host port the sandbox reaches. The runtime grants the host's model server at
 `11434` as well, so a pinned `ollama` provider can answer, and that grant is not this kit's: any
 process in the sandbox can dial it. Both ports are fixed, so the surface is two named ports rather
-than every host port — but a reader who takes `localhost:27183` for the whole of it is reading a
-narrower boundary than the one in force.
+than every host port, and `localhost:27183` in `permissions.network.allow` names only one of them.
 
 Loopback is shared with every other local process, so the port alone is no boundary: the secret is,
 and it is per project. A connection naming another project's digest — including another sandbox's —
@@ -123,13 +122,13 @@ notice. The same relay carries it:
   CLI's dial is to its own loopback, never through the proxy, so this is a listener to provide
   rather than a host to permit.
 - The two halves share a protocol version, and the relay script publishes nothing while the daemon
-  answers a lower one or none at all. A daemon started before a preamble was added closes its
-  connection silently, which reads as a dead IDE, so the `health` reply names the version and the
-  script reports the mismatch once rather than leaving it to look like an IDE that is down. The
-  version also covers the secret check on every other preamble: a daemon that predates it splices
-  whichever project a caller names. **Restart the daemon after pulling a change to it**, since a
-  running daemon keeps the preambles it started with; the sandbox's watcher then picks the work up
-  within a tick, without restarting the sandbox.
+  answers a lower one or none at all. A daemon that does not know a preamble closes its connection
+  silently, which reads as a dead IDE, so the `health` reply names the version and the script reports
+  the mismatch once rather than leaving it to look like an IDE that is down. The version also covers
+  the secret check on every other preamble: a daemon below it splices whichever project a caller
+  names. **Restart the daemon after pulling a change to it**, since a running daemon keeps the
+  preambles it started with; the sandbox's watcher then picks the work up within a tick, without
+  restarting the sandbox.
 - The MCP exchange is parsed rather than spliced, so the daemon can hold the sandbox to an
   allowlist of tools. A tool the list does not name is removed from a `tools/list` reply and refused
   on `tools/call` from the daemon itself, so the IDE never sees the call: that is what keeps a tool a
@@ -240,11 +239,10 @@ and falls back to `/home/agent`, since a startup hook can run without one.
 Junie is not installed into the image, and neither is a browser: both come from the host, so the
 vendor install script never runs and the kit's egress allowlist can name no install host. What the
 image does carry is the libraries the host's browsers link — no template has them, and a mount cannot
-supply what loads by path rather than by soname, which is what ruled the earlier
-gather-them-off-the-host approach out ([Browser libraries](../README.md#browser-libraries)). Those
-libraries are installed at image build time from Playwright's own dependency list, so they add no host
-to the runtime allowlist either. The engine adds none, since nothing here installs through it at
-create time. `fonts-dejavu-core` is installed beside that list: the base ships no fonts, and the
+supply what loads by path rather than by soname ([Browser libraries](../README.md#browser-libraries)).
+Those libraries are installed at image build time from Playwright's own dependency list, so they add
+no host to the runtime allowlist either. The engine adds none, since nothing here installs through it
+at create time. `fonts-dejavu-core` is installed beside that list: the base ships no fonts, and the
 resolver's own set leaves `monospace` resolving to a font without the box-drawing glyphs the TUI
 draws ([Browser libraries](../README.md#browser-libraries)).
 

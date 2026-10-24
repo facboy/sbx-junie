@@ -54,9 +54,9 @@ provisions as it starts the sandbox: one record per project under
 and its secret. A connection is spliced only when its secret matches a record
 whose project contains the IDE's, so a sandbox reaches its own project's IDE and
 no other, and a local process without the secret reaches nothing at all. A digest
-that resolves to no IDE is answered as before -- `gone` says there is nothing to
-reach -- so the check does not depend on an IDE being up. A host with no records
-relays nothing.
+that resolves to no IDE is answered as `gone` -- there is nothing to reach -- so
+the check does not depend on an IDE being up. A host with no records relays
+nothing.
 
 A secret is only a credential while it is the operator's alone, so the daemon
 refuses to start when the records, or the directory holding them, are reachable
@@ -83,9 +83,9 @@ It is read from `${XDG_CONFIG_HOME:-$HOME/.config}/junie-sbx/relayd.toml`, or
 when the IDE behind the digest is no longer running. The sandbox closes a mirror
 for either, so a port the IDE gave up is not held open, but keeps one for
 `unknown` -- the plugin answered nothing, which a momentary failure looks like
-too. The health reply names the protocol version, so a sandbox can tell this
-daemon from one started before it learned these preambles and ask for a restart
-rather than read the silence as a dead IDE.
+too. The health reply names the protocol version, so a sandbox can tell a daemon
+that knows these preambles from one that does not, and ask for a restart rather
+than read the silence as a dead IDE.
 
 Binds `127.0.0.1` only -- the sandbox reaches it through the runtime's
 host-loopback forwarding, which the kit allowlists as `localhost:<PORT>`.
@@ -130,11 +130,10 @@ EX_CONFIG = 78
 # Records hold the hex `secrets.token_hex(32)` that `junie-sbx.sh` wrote.
 SECRET_HEX_LEN = 64
 PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
-# Bumped when a preamble the sandbox side depends on is added, so that a daemon
-# started before it is recognisable rather than silently rejecting the preamble.
-# A daemon too old to name a version answers the bare `ok` a 1 daemon also does.
-# 3 is the secret on every preamble but `health`: the sandbox publishes nothing
-# against a 2 daemon, which splices whatever project a caller names.
+# The protocol version this daemon answers with. The sandbox reads it from the
+# health reply and publishes nothing against a daemon that names a lower one or
+# none, since a daemon without the banner closes an MCP preamble silently, and one
+# below 3 splices whatever project a caller names instead of checking a secret.
 PROTOCOL_VERSION = 3
 HEALTH_PAYLOAD = b"health"
 HEALTH_REPLY = ("JUNIE-RELAY 1 ok %d\n" % PROTOCOL_VERSION).encode()
@@ -1587,8 +1586,8 @@ def handle(conn, instances_dir, secrets_dir, allow_state):
     if payload == HEALTH_PAYLOAD:
         # Lets the sandbox-side relay tell "daemon absent" from "daemon here"
         # in one round trip, instead of inferring it from a failed relay. The
-        # reply names the protocol version, so a daemon started before a
-        # preamble was added is told apart from one that has it.
+        # reply names the protocol version, so a daemon that does not know a
+        # preamble is told apart from one that does.
         try:
             conn.sendall(HEALTH_REPLY)
         except OSError:

@@ -39,11 +39,11 @@ PROJ_DIR="${SBX_STATE_DIR}/${PROJ}-${PROJ_KEY}"
 JUNIE_HOME="${PROJ_DIR}/_junie"
 OV_ROOT="${PROJ_DIR}/overlays"
 
-# The directory used to be named for the project alone, so state an earlier run
-# left sits beside the new one. Its `_junie` holds the sessions the CLI recorded,
-# so it is renamed the first time rather than abandoned. A directory with an
-# overlay still mounted under it is left where it is: that mount is a path inside
-# it, and moving it would leave the mount naming nothing.
+# A state directory named for the project alone sits beside the current one when
+# a run predating the digest key has written it. Its `_junie` holds the sessions
+# the CLI recorded, so it is renamed the first time rather than abandoned. A
+# directory with an overlay still mounted under it is left where it is: that mount
+# is a path inside it, and moving it would leave the mount naming nothing.
 LEGACY_DIR="${SBX_STATE_DIR}/${PROJ}"
 if [[ -d "${LEGACY_DIR}" && ! -e "${PROJ_DIR}" ]]; then
 	if grep -qF " ${LEGACY_DIR}/" /proc/self/mounts 2> /dev/null; then
@@ -246,8 +246,8 @@ provision_relay_secret() {
 	umask 077
 	mkdir -p "${SECRETS_DIR}"
 	# The daemon refuses to start on a secret another local user can reach, so
-	# both levels are tightened on every run: a directory an earlier run or a
-	# different umask left wider would otherwise stop the relay.
+	# both levels are tightened on every run: a directory left at a wider mode by
+	# any run or umask would otherwise stop the relay.
 	chmod 700 "${SECRETS_DIR}"
 	python3 - "${SECRETS_DIR}" "${PWD}" <<-'PY'
 		import hashlib, json, os, sys
@@ -275,8 +275,8 @@ RELAY_SECRET="$(provision_relay_secret)"
 init_junie_home() {
 	mkdir -p "${JUNIE_HOME}/sessions"
 
-	# `-sfn` per name, so a rerun replaces the links rather than failing on
-	# the ones an earlier run made.
+	# `-sfn` per name, so a rerun replaces the links rather than failing on the
+	# ones already there.
 	local name
 	for name in AGENTS.md docs tools; do
 		/usr/bin/ln -sfn "${DOT_JUNIE_RO}/${name}" "${JUNIE_HOME}/${name}"
@@ -381,7 +381,7 @@ MOUNTS=(
 )
 
 # sbx rejects a mount whose host path is missing, so the optional host trees are
-# added only when present. The overlays were created above and so always exist.
+# added only when present. The overlays this script creates always exist.
 add_mount() {
 	if [[ -e "$1" ]]; then
 		MOUNTS+=("$1$2")

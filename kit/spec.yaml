@@ -26,14 +26,13 @@ permissions:
       # preset; deny-all is where it is the whole surface.
       # Use the host user's junie install, and the spec also sets
       # JUNIE_SKIP_UPDATE_CHECK=1, so the installed binary never checks for
-      # or stages a runtime update. That drops github.com,
-      # raw.githubusercontent.com, and release-assets.githubusercontent.com
-      # from this list entirely: all three were reachable only for the
-      # vendor installer's own version-resolution feed and the GitHub-hosted
-      # release zip it downloads, and neither is a credential inject domain.
-      # junie.jetbrains.com stays -- it doubles as the `junie` credential's
-      # inject domain below, so it is still needed at runtime independent of
-      # install.
+      # or stages a runtime update. github.com, raw.githubusercontent.com and
+      # release-assets.githubusercontent.com are therefore absent: the vendor
+      # installer's version-resolution feed and the GitHub-hosted release zip
+      # it downloads are the only things that need them, and neither is a
+      # credential inject domain. junie.jetbrains.com stays -- it doubles as the
+      # `junie` credential's inject domain below, so it is needed at runtime
+      # independent of install.
       - junie.jetbrains.com
       - api.jetbrains.ai
       - api.anthropic.com
@@ -59,12 +58,9 @@ credentials:
         - domain: api.anthropic.com
           header: x-api-key
           format: '%s'
-  # v1 also accepted GOOGLE_GENERATIVE_AI_API_KEY as a fallback host env var
-  # name for this credential (credentials.sources.google.env listed both).
-  # v2's apiKey.name is a single string with no alias list, so only one host
-  # env var can be recognized here; GEMINI_API_KEY is Google's current
-  # canonical name for this key, so it's the one kept. A host with only
-  # GOOGLE_GENERATIVE_AI_API_KEY set will no longer be picked up.
+  # `apiKey.name` is one host env var with no alias list, so a host that sets
+  # only GOOGLE_GENERATIVE_AI_API_KEY for this key is not picked up here;
+  # GEMINI_API_KEY is Google's canonical name for it.
   - service: google
     apiKey:
       name: GEMINI_API_KEY

@@ -140,10 +140,10 @@ fonts at all, and the resolver's own choices leave the generic `monospace` famil
 font without the box-drawing and block glyphs a terminal UI draws; with DejaVu it resolves there,
 and the TUI's borders render as lines instead of fallback boxes.
 
-Consequences worth knowing:
+### Consequences
 
 - The image is what makes the browsers work, so a sandbox on a bare template has none of this and
-  fails with the `libglib-2.0.so.0` error above.
+  cannot load `libglib-2.0.so.0`.
 - The dependency set tracks the Playwright release the image was built for (`PLAYWRIGHT_VERSION` in
   the Dockerfile). A host on a newer release works while that release needs nothing extra; one whose
   browsers start failing on a missing soname means the image is behind and wants a rebuild.
@@ -155,7 +155,7 @@ Consequences worth knowing:
   revision is unchanged between those bundles, so a plain install sees the directory complete and
   leaves it alone.
 - Nothing about the library path can break from inside a running sandbox: there is no mount to go
-  stale, which is why the earlier gather-and-register path is gone.
+  stale.
 
 ### Switching a tree off
 
@@ -167,7 +167,7 @@ uv = true
 pnpm = false
 ```
 
-Both default to on, so a project with no file behaves as it always did. `pnpm = false` drops the
+Both default to on, so a project with no file gets both trees. `pnpm = false` drops the
 pnpm tree, its store and cache, and with them the host's node and fnm tree and the Playwright
 browsers under `~/.cache/ms-playwright`: the pnpm that matches your store needs the node it was
 built on, and the browsers it drives are the rest of that tool chain. `uv = false` drops the uv
@@ -187,10 +187,10 @@ The same file adds host paths to the mounts the script passes:
 mounts = ["~/data", "~/datasets:ro"]
 ```
 
-They are appended to the ones above, at their host paths, and a trailing `:ro` makes one read-only
-as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a relative
-entry resolves against the project directory. A path under the project needs nothing: it is already
-the workspace.
+They are appended to the script's own mounts, at their host paths, and a trailing `:ro` makes one
+read-only as it does on the command line. `~/` is expanded, since TOML has no shell to do it, and a
+relative entry resolves against the project directory. A path under the project needs nothing: it is
+already the workspace.
 
 An entry naming a path outside the project is mounted only after you approve it once, because the
 file naming it is one the agent can edit. An unapproved entry stops the run and prints the command
@@ -232,7 +232,7 @@ python3 bin/junie-ide-relayd &
 It needs no arguments; `--port` and `--instances` override the fixed port and the
 `~/.junie/instances` directory it reads, `--secrets` points at another directory of per-project
 secrets, and `--config` points at another allowlist file, which
-[MCP tools](#connecting-to-an-ide-on-the-host) below covers. The sandbox-side relay is a no-op until
+[MCP tools](#connecting-to-an-ide-on-the-host) covers. The sandbox-side relay is a no-op until
 it is up.
 
 A sandbox reaches only its own project's IDE. `junie-sbx.sh` writes one secret per project under
@@ -342,15 +342,16 @@ file that will not parse stops the daemon at startup, and one that will not pars
 the list already in force.
 
 Every entry is a grant to run something on the host, so adding one back widens the boundary the
-defaults draw — the tools named above are withheld for that reason, not because they are unused.
+defaults draw — `build_project`, `execute_terminal_command` and the notebook runners are withheld
+for that reason, not because they are unused.
 
 `SIGHUP` re-reads the file, so a change does not drop the connections a running sandbox holds:
 `systemctl --user reload junie-ide-relayd` under the sample unit, or `kill -HUP` on the daemon's pid.
 The list in force is named in the log at startup and at each reload, with the source it came from.
 
 The two halves speak a versioned protocol, and the sandbox publishes nothing against a daemon older
-than it needs — a daemon started before one of its preambles closed its connection silently, which
-reads as a dead IDE. So restart the daemon after pulling a change to it:
+than it needs — a daemon that does not know a preamble closes the connection silently, which reads as
+a dead IDE. So restart the daemon after pulling a change to it:
 
 ```console
 systemctl --user restart junie-ide-relayd
@@ -389,7 +390,7 @@ That is what makes the read-only view reachable at the paths a tool expects — 
 ## Cleanup
 
 Stop the host daemon when you are done with the IDE connection — it is a plain foreground process, so
-`Ctrl-C` in its terminal, or `kill` its pid; under the sample unit above,
+`Ctrl-C` in its terminal, or `kill` its pid; with `systemd/user/junie-ide-relayd.service`,
 `systemctl --user disable --now junie-ide-relayd` also keeps it from starting at the next login.
 Ending the sandbox leaves it running, and it holds only a listening socket.
 

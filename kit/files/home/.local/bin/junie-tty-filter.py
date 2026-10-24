@@ -18,10 +18,11 @@ The outer terminal is put in raw mode rather than only partly: `ICRNL` would tur
 Enter's CR into a NL, and `IXON` would eat Ctrl-S and Ctrl-Q.
 
 Both directions are queued, and the terminal's queue is drained by a thread of its
-own: a write to a terminal that is not draining waits, and a wait on the path that
-reads input is what wedged the session. A terminal that goes away ends the session
--- the child is hung up, and one that catches the signal and stays is ended after
-`HANGUP_GRACE` -- rather than leaving this process on a terminal nothing reads.
+own: a write to a terminal that is not draining waits, and doing that wait on the
+path that reads input would stall keystrokes until the terminal caught up. A
+terminal that goes away ends the session -- the child is hung up, and one that
+catches the signal and stays is ended after `HANGUP_GRACE` -- rather than leaving
+this process on a terminal nothing reads.
 
 One output sequence is rewritten: `ESC[?1003h` becomes `ESC[?1002h`, and nothing
 else is touched. Mouse tracking modes 1000, 1002 and 1003 are one mutually
@@ -269,8 +270,7 @@ def main(argv):
     # Both directions are queued rather than written where they are read, and the
     # terminal's queue is drained by a thread of its own. A write to a terminal
     # that is not draining waits, and doing that wait on the path that reads input
-    # is what wedged the session: keystrokes stopped reaching the CLI until the
-    # terminal caught up.
+    # would stall keystrokes until the terminal caught up.
     to_child = b""
     to_terminal = collections.deque()
     queued_bytes = 0
@@ -316,9 +316,9 @@ def main(argv):
     # continuously keeps the loop busy, and a hold would then never expire.
     partial = b""
     partial_since = None
-    # Output held for the motion rewrite, with its own deadline. One deadline for
-    # both holds was wrong: a motion hold expiring released an input prefix that
-    # still had time left, whose tail then arrived as typed text.
+    # Output held for the motion rewrite, with its own deadline. Sharing the input
+    # prefix's deadline released a motion hold with time left, whose tail then
+    # arrived as typed text.
     held_output = b""
     held_since = None
     # When the terminal this process reads went away, if it has.

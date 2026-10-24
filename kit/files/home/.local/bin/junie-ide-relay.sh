@@ -122,10 +122,10 @@ release_watcher_pidfile() {
 trap 'rm -f "$relays" "$wanted"; release_watcher_pidfile' EXIT
 
 # The protocol version the daemon must speak for the MCP preambles to be
-# answered. A daemon started before they were added closes those connections
-# silently, which reads as a dead port, so its absence is reported rather than
-# left to look like an IDE that is down. A daemon below this also lacks the
-# secret check, and would splice any project a caller names.
+# answered. A daemon that does not know them closes those connections silently,
+# which reads as a dead port, so its absence is reported rather than left to look
+# like an IDE that is down. A daemon below this also lacks the secret check, and
+# would splice any project a caller names.
 required_daemon_version=3
 
 # Without the daemon there is nothing to dial, so nothing is published and the
@@ -145,9 +145,9 @@ except Exception:
 	return 1
 }
 
-# The protocol version the daemon reports, or nothing when it is older than the
-# version banner itself. Only a daemon that names one has been restarted since
-# the banner was added, so this is what tells the two apart.
+# The protocol version the daemon reports, or nothing when it answers without
+# one. Only a daemon that names a version is new enough to answer the preambles
+# below, so this is what tells the two apart.
 daemon_version() {
 	reply=$(python3 -c '
 import socket, sys
@@ -175,9 +175,9 @@ argument_after() {
 # Whether pid $1 is still the endpoint this script started for port $2, digest
 # $3, mirroring the IDE's MCP server when $4 is 1. A recorded pid can be handed
 # to an unrelated process once its endpoint dies -- and to another endpoint of
-# this script, which is how a record from before a sandbox restart came to name
-# a mirror that was never started -- so the arguments it was started with are
-# what confirm it, not the binary alone.
+# this script, which would leave the record naming a mirror that was never
+# started -- so the arguments it was started with are what confirm it, not the
+# binary alone.
 is_our_endpoint() {
 	endpoint_pid=$1
 	endpoint_port=$2
