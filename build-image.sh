@@ -9,6 +9,6 @@ KIT="${SCRIPT_DIR}/kit"
 # `IMAGE` names another tag, and any argument is passed to `docker build`.
 IMAGE="${IMAGE:-docker.io/facboy/junie-sbx:latest}"
 
-docker build --tag "${IMAGE}" "$@" "${KIT}"
+docker build --pull --tag "${IMAGE}" "$@" "${KIT}"
 
 echo "built ${IMAGE}"
