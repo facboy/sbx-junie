@@ -1,5 +1,6 @@
 """Tests for the relay daemon's parsers, its tool allowlist and its exit status."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -530,6 +531,107 @@ class ParserTest(unittest.TestCase):
         self.assertFalse(relayd.is_digest(b"0123456789abcdef"))
         self.assertTrue(relayd.is_secret(b"0123456789abcdef" * 4))
         self.assertFalse(relayd.is_secret(b"0123456789abcdef" * 3 + b"g"))
+
+
+class PairBridgeTest(unittest.TestCase):
+    """`pair <digest> <secret>` reaches the plugin socket the instance file names.
+
+    Schema 3 replaced the per-file `rpc_token` with a socket the CLI dials for
+    one, and that path is on the host: published as it stands, the sandbox is
+    handed an address nothing there can dial, which the CLI reports as a pairing
+    failure rather than a missing IDE.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.instances = os.path.join(self.root, "instances")
+        self.secrets = os.path.join(self.root, "relay-secrets")
+        os.mkdir(self.instances)
+        os.mkdir(self.secrets, 0o700)
+        self.secret = "a" * relayd.SECRET_HEX_LEN
+        self.project = os.path.join(self.root, "project")
+        self.digest = hashlib.md5(self.project.encode()).hexdigest()
+        record = os.path.join(self.secrets, "project.json")
+        with open(record, "w") as handle:
+            json.dump({"project_path": self.project, "secret": self.secret}, handle)
+        os.chmod(record, 0o600)
+
+    def publish(self, **fields):
+        """One instance file naming this project, written `fields` ahead."""
+        info = {"schema_version": 3, "project_path": self.project,
+                "port": 41154, "pid": 1}
+        info.update(fields)
+        path = os.path.join(self.instances, "%s_%d.json" % (self.digest, info["pid"]))
+        with open(path, "w") as handle:
+            json.dump(info, handle)
+        return path
+
+    def test_the_instance_file_pair_socket_is_resolved(self):
+        pair = os.path.join(self.root, "pair.sock")
+        self.publish(pair_socket=pair)
+        self.assertEqual(relayd.pair_socket_for_digest(self.instances, self.digest), pair)
+
+    def test_an_instance_file_with_no_pair_socket_resolves_to_none(self):
+        # A plugin below schema 3 publishes a token in the file instead, and the
+        # CLI falls back to it, so this is a working configuration rather than a
+        # fault.
+        self.publish(rpc_token="t")
+        self.assertIsNone(relayd.pair_socket_for_digest(self.instances, self.digest))
+
+    def test_a_pair_preamble_is_spliced_to_the_plugin_socket(self):
+        pair = os.path.join(self.root, "pair.sock")
+        self.publish(pair_socket=pair)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(pair)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        seen = {}
+
+        def fake_plugin():
+            conn, _ = listener.accept()
+            seen["hello"] = conn.recv(4096)
+            conn.sendall(b'{"status":"allowed","token":"tok"}\n')
+            conn.close()
+
+        plugin = threading.Thread(target=fake_plugin, daemon=True)
+        plugin.start()
+
+        relay_end, client = socket.socketpair()
+        self.addCleanup(client.close)
+        allow = relayd.AllowState(os.path.join(self.root, "none.toml"), None, False)
+        threading.Thread(target=relayd.serve,
+                         args=(relay_end, self.instances, self.secrets, allow),
+                         daemon=True).start()
+        client.settimeout(TIMEOUT)
+        client.sendall(b"JUNIE-RELAY 1 pair %s %s\n"
+                       % (self.digest.encode(), self.secret.encode()))
+        client.sendall(b'{"client":"junie"}\n')
+        self.assertEqual(client.recv(4096), b'{"status":"allowed","token":"tok"}\n')
+        plugin.join(TIMEOUT)
+        self.assertEqual(seen.get("hello"), b'{"client":"junie"}\n')
+
+    def test_a_pair_preamble_without_the_secret_reaches_no_plugin(self):
+        pair = os.path.join(self.root, "pair.sock")
+        self.publish(pair_socket=pair)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(pair)
+        listener.listen(1)
+        listener.settimeout(0.5)
+        self.addCleanup(listener.close)
+
+        relay_end, client = socket.socketpair()
+        self.addCleanup(client.close)
+        allow = relayd.AllowState(os.path.join(self.root, "none.toml"), None, False)
+        threading.Thread(target=relayd.serve,
+                         args=(relay_end, self.instances, self.secrets, allow),
+                         daemon=True).start()
+        client.settimeout(TIMEOUT)
+        client.sendall(b"JUNIE-RELAY 1 pair %s %s\n"
+                       % (self.digest.encode(), ("b" * relayd.SECRET_HEX_LEN).encode()))
+        self.assertEqual(client.recv(4096), b"")
+        with self.assertRaises(socket.timeout):
+            listener.accept()
 
 
 class ExitStatusTest(unittest.TestCase):

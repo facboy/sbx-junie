@@ -98,6 +98,22 @@ the daemon resolves each digest to the newest of them; publishing from any other
 a token that IDE does not know, which the plugin answers as `Invalid or missing token` and the CLI
 reports as `AuthRequired`/`Unauthorized`.
 
+### The plugin's pair socket
+
+An instance file from plugin schema 3 on carries no token. It names a `pair_socket` instead — a Unix
+domain socket the plugin listens on — and the CLI dials it, sends a `PairHello`, and takes the
+session token from the `PairReply`. That path is on the host, so the file published into the sandbox
+would name a socket nothing there can dial, which the CLI reports as `Pairing failed: No such file or
+directory` in place of a connection.
+
+The same relay carries it. `junie-ide-relay.sh` binds a socket of its own for the project, under
+`/tmp` because an `AF_UNIX` path is bounded at about a hundred bytes and the per-project state
+directory is longer than that, and publishes that path in the instance file in place of the host's.
+Its endpoint is started with `--unix PATH --pair`, so each connection opens with
+`JUNIE-RELAY 1 pair <digest> <secret>`; the daemon resolves the digest to the host `pair_socket` and
+splices the two. A plugin below schema 3 publishes no `pair_socket`, and the file's `rpc_token` is
+then published unchanged, which is what the CLI falls back to.
+
 ### The IDE's built-in MCP server
 
 The plugin also serves the IDE's own MCP tools, on a port of its choosing, and hands that port to the

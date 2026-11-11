@@ -106,6 +106,8 @@ host_dir=$(find_host_dir) || exit 0
 mkdir -p "$instances_dir" "$records_dir"
 relays=$(mktemp)
 wanted=$(mktemp)
+pairs=$(mktemp)
+paircandidates=$(mktemp)
 
 # The watcher's pidfile names that process only while it runs. Left behind, a
 # `SIGTERM` would have the next start read a pid some later process happened to
@@ -119,14 +121,14 @@ release_watcher_pidfile() {
 	[ "${recorded:-}" = "$$" ] || return 0
 	rm -f "$watcher_pidfile"
 }
-trap 'rm -f "$relays" "$wanted"; release_watcher_pidfile' EXIT
+trap 'rm -f "$relays" "$wanted" "$pairs" "$paircandidates"; release_watcher_pidfile' EXIT
 
 # The protocol version the daemon must speak for the MCP preambles to be
 # answered. A daemon that does not know them closes those connections silently,
 # which reads as a dead port, so its absence is reported rather than left to look
 # like an IDE that is down. A daemon below this also lacks the secret check, and
 # would splice any project a caller names.
-required_daemon_version=3
+required_daemon_version=4
 
 # Without the daemon there is nothing to dial, so nothing is published and the
 # sandbox is left as it was found.
@@ -172,41 +174,59 @@ argument_after() {
 	awk -v want="$1" 'previous == want { print; exit } { previous = $0 }'
 }
 
-# Whether pid $1 is still the endpoint this script started for port $2, digest
-# $3, mirroring the IDE's MCP server when $4 is 1. A recorded pid can be handed
-# to an unrelated process once its endpoint dies -- and to another endpoint of
-# this script, which would leave the record naming a mirror that was never
-# started -- so the arguments it was started with are what confirm it, not the
-# binary alone.
+# The pair socket this script publishes for digest $1. Short by necessity: an
+# AF_UNIX path is bounded at about a hundred bytes, and the per-project state
+# directory is already longer than that, so this sits beside the other session
+# sockets under /tmp rather than in the records directory.
+pair_path_for_digest() {
+	printf '%s/junie-ide-pair-%s.sock\n' "${JUNIE_IDE_PAIR_DIR:-/tmp}" "$1"
+}
+
+# Whether pid $1 is still the endpoint this script started for `$2` -- a port for
+# the RPC and MCP kinds, a socket path for `pair` -- digest $3, of kind $4 (one of
+# `rpc`, `mcp`, `pair`). A recorded pid can be handed to an unrelated process
+# once its endpoint dies -- and to another endpoint of this script, which would
+# leave the record naming a mirror that was never started -- so the arguments it
+# was started with are what confirm it, not the binary alone.
 is_our_endpoint() {
 	endpoint_pid=$1
-	endpoint_port=$2
+	endpoint_address=$2
 	endpoint_digest=$3
-	endpoint_mcp=${4:-0}
+	endpoint_kind=$4
 	[ -r "/proc/$endpoint_pid/cmdline" ] || return 1
 	endpoint_argv=$(tr '\0' '\n' <"/proc/$endpoint_pid/cmdline" 2>/dev/null) || return 1
 	case $endpoint_argv in
 	*'junie-ide-relay-endpoint.py'*) ;;
 	*) return 1 ;;
 	esac
-	[ "$(printf '%s\n' "$endpoint_argv" | argument_after --port)" = "$endpoint_port" ] || return 1
 	[ "$(printf '%s\n' "$endpoint_argv" | argument_after --digest)" = "$endpoint_digest" ] || return 1
-	if [ "$endpoint_mcp" = 1 ]; then
+	case $endpoint_kind in
+	pair)
+		[ "$(printf '%s\n' "$endpoint_argv" | argument_after --unix)" = "$endpoint_address" ] || return 1
+		printf '%s\n' "$endpoint_argv" | grep -qx -- '--pair' || return 1
+		;;
+	mcp)
+		[ "$(printf '%s\n' "$endpoint_argv" | argument_after --port)" = "$endpoint_address" ] || return 1
 		printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' || return 1
-	elif printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp'; then
-		return 1
-	fi
+		;;
+	*)
+		[ "$(printf '%s\n' "$endpoint_argv" | argument_after --port)" = "$endpoint_address" ] || return 1
+		printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' && return 1
+		printf '%s\n' "$endpoint_argv" | grep -qx -- '--pair' && return 1
+		;;
+	esac
 	return 0
 }
 
-# Echo "<port> <pid>" for an endpoint already running for digest $1, mirroring the
-# IDE's MCP server when $2 is 1, or nothing. The record is the fast path, but it
-# is only a file: one lost, or one a restart left naming a pid this boot gave to
-# another process, would otherwise have the next pass start a second endpoint
-# that cannot bind the port the first one still holds.
+# Echo "<address> <pid>" for an endpoint already running for digest $1 of kind
+# $2, or nothing. An address is a port for `rpc` and `mcp`, and the socket path
+# for `pair`. The record is the fast path, but it is only a file: one lost, or
+# one a restart left naming a pid this boot gave to another process, would
+# otherwise have the next pass start a second endpoint that cannot bind the port
+# the first one still holds.
 endpoint_for_digest() {
 	endpoint_digest=$1
-	endpoint_mcp=${2:-0}
+	endpoint_kind=${2:-rpc}
 	for entry in /proc/[0-9]*; do
 		endpoint_pid=${entry#/proc/}
 		[ -r "/proc/$endpoint_pid/cmdline" ] || continue
@@ -216,14 +236,20 @@ endpoint_for_digest() {
 		*) continue ;;
 		esac
 		[ "$(printf '%s\n' "$endpoint_argv" | argument_after --digest)" = "$endpoint_digest" ] || continue
-		if [ "$endpoint_mcp" = 1 ]; then
-			printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' || continue
-		elif printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp'; then
-			continue
+		if [ "$endpoint_kind" = pair ]; then
+			printf '%s\n' "$endpoint_argv" | grep -qx -- '--pair' || continue
+			endpoint_address=$(printf '%s\n' "$endpoint_argv" | argument_after --unix)
+		else
+			printf '%s\n' "$endpoint_argv" | grep -qx -- '--pair' && continue
+			if [ "$endpoint_kind" = mcp ]; then
+				printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' || continue
+			else
+				printf '%s\n' "$endpoint_argv" | grep -qx -- '--mcp' && continue
+			fi
+			endpoint_address=$(printf '%s\n' "$endpoint_argv" | argument_after --port)
 		fi
-		endpoint_port=$(printf '%s\n' "$endpoint_argv" | argument_after --port)
-		[ -n "$endpoint_port" ] || continue
-		printf '%s %s\n' "$endpoint_port" "$endpoint_pid"
+		[ -n "$endpoint_address" ] || continue
+		printf '%s %s\n' "$endpoint_address" "$endpoint_pid"
 		return 0
 	done
 	return 1
@@ -274,7 +300,7 @@ stop_mcp_mirror() {
 	[ -f "$record" ] || return 0
 	read -r recorded_port endpoint_pid <"$record" || true
 	if [ -n "${endpoint_pid:-}" ] &&
-		is_our_endpoint "$endpoint_pid" "${recorded_port:-}" "$1" 1; then
+		is_our_endpoint "$endpoint_pid" "${recorded_port:-}" "$1" mcp; then
 		kill "$endpoint_pid" 2>/dev/null
 	fi
 	rm -f "$record"
@@ -294,14 +320,14 @@ relay_for_digest() {
 	if [ -f "$record" ]; then
 		read -r recorded_port recorded_pid <"$record" || true
 		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
-			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" 0; then
+			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" rpc; then
 			printf '%s %s\n' "$recorded_port" "$recorded_pid"
 			return 0
 		fi
 		rm -f "$record"
 	fi
 
-	if found=$(endpoint_for_digest "$digest" 0); then
+	if found=$(endpoint_for_digest "$digest" rpc); then
 		set -- $found
 		printf '%s %s\n' "$1" "$2" >"$record"
 		printf '%s %s\n' "$1" "$2"
@@ -355,7 +381,7 @@ relay_mcp_for_digest() {
 	if [ -f "$record" ]; then
 		read -r recorded_port recorded_pid <"$record" || true
 		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
-			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" 1; then
+			is_our_endpoint "$recorded_pid" "${recorded_port:-}" "$digest" mcp; then
 			if [ "$recorded_port" = "$mcp_port" ]; then
 				printf '%s %s\n' "$recorded_port" "$recorded_pid"
 				return 0
@@ -365,7 +391,7 @@ relay_mcp_for_digest() {
 		rm -f "$record"
 	fi
 
-	if found=$(endpoint_for_digest "$digest" 1); then
+	if found=$(endpoint_for_digest "$digest" mcp); then
 		set -- $found
 		if [ "$1" = "$mcp_port" ]; then
 			printf '%s %s\n' "$1" "$2" >"$record"
@@ -392,6 +418,68 @@ relay_mcp_for_digest() {
 		return 0
 	fi
 	return 1
+}
+
+# Ensure the pair socket the CLI dials for digest $1 exists, for the host socket
+# path $2. The plugin's socket is a path on the host, so nothing in the sandbox
+# can dial it: this binds a sandbox path and the daemon's `pair` preamble splices
+# it to the plugin's own. Echoes the sandbox path, which is what the published
+# instance file names.
+relay_pair_for_digest() {
+	digest=$1
+	record="$records_dir/pair-$digest"
+	path=$(pair_path_for_digest "$digest")
+
+	if [ -f "$record" ]; then
+		read -r recorded_path recorded_pid <"$record" || true
+		if [ -n "${recorded_pid:-}" ] && kill -0 "$recorded_pid" 2>/dev/null &&
+			is_our_endpoint "$recorded_pid" "${recorded_path:-}" "$digest" pair; then
+			printf '%s\n' "$recorded_path"
+			return 0
+		fi
+		rm -f "$record"
+	fi
+
+	if found=$(endpoint_for_digest "$digest" pair); then
+		set -- $found
+		printf '%s %s\n' "$1" "$2" >"$record"
+		printf '%s\n' "$1"
+		return 0
+	fi
+
+	# Cleared first, so a record left by an endpoint that has since died cannot
+	# be mistaken for this attempt's successful bind.
+	rm -f "$record"
+	setsid python3 "$endpoint" --unix "$path" --digest "$digest" --pair \
+		--host "$ide_host" --host-port "$relay_port" \
+		--record "$record" >/dev/null 2>&1 &
+
+	waited=0
+	while [ "$waited" -lt 30 ] && [ ! -s "$record" ]; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	if [ -s "$record" ]; then
+		read -r bound_path bound_pid <"$record"
+		printf '%s\n' "$bound_path"
+		return 0
+	fi
+	return 1
+}
+
+# Stop the pair bridge for digest $1 and drop its record, with the socket file
+# it bound. Named by a record whose pid is gone or is not an endpoint of ours is
+# removed without a signal.
+stop_pair_bridge() {
+	record="$records_dir/pair-$1"
+	[ -f "$record" ] || return 0
+	read -r recorded_path endpoint_pid <"$record" || true
+	if [ -n "${endpoint_pid:-}" ] &&
+		is_our_endpoint "$endpoint_pid" "${recorded_path:-}" "$1" pair; then
+		kill "$endpoint_pid" 2>/dev/null
+		rm -f "$recorded_path"
+	fi
+	rm -f "$record"
 }
 
 # One pass over the host's instance files. Returns early rather than exiting when
@@ -421,6 +509,8 @@ relay_pass() {
 
 	: >"$relays"
 	: >"$wanted"
+	: >"$pairs"
+	: >"$paircandidates"
 
 	# The instances naming this sandbox's own project, as "<digest>\t<path>"
 	# lines: tab-separated so a project path with spaces stays one field.
@@ -472,6 +562,65 @@ relay_pass() {
 		esac
 	done <"$wanted"
 
+	# The pair socket the CLI dials for its session token. The plugin names a host
+	# path, which nothing in the sandbox can reach, so a sandbox socket is bound
+	# here and the published instance file names that instead. A project whose IDE
+	# publishes none is left alone: a plugin below schema 3 puts its token in the
+	# file, and the CLI falls back to it.
+	python3 - "$host_dir" "$sandbox_project" "$relays" <<-'PY' >"$paircandidates"
+		import glob, hashlib, json, os, sys
+
+		host_dir, sandbox_project, relays_path = sys.argv[1], sys.argv[2], sys.argv[3]
+		sandbox_root = os.path.realpath(sandbox_project)
+
+		served = set()
+		with open(relays_path) as handle:
+		    for line in handle:
+		        served.add(line.split("\t", 1)[0])
+
+		newest = {}
+		for source in sorted(glob.glob(os.path.join(host_dir, "*.json"))):
+		    try:
+		        with open(source) as handle:
+		            info = json.load(handle)
+		        project = info["project_path"]
+		        port = int(info["port"])
+		    except Exception:
+		        continue
+		    if not isinstance(project, str):
+		        continue
+		    resolved = os.path.realpath(project)
+		    if resolved != sandbox_root and not resolved.startswith(sandbox_root + os.sep):
+		        continue
+		    digest = hashlib.md5(project.encode()).hexdigest()
+		    if digest not in served:
+		        continue
+		    path = info.get("pair_socket")
+		    if not isinstance(path, str) or not path:
+		        continue
+		    stamp = (os.stat(source).st_mtime, port)
+		    if digest not in newest or stamp > newest[digest]:
+		        newest[digest] = stamp
+		for digest in newest:
+		    print(digest)
+	PY
+
+	while IFS= read -r digest; do
+		[ -n "$digest" ] || continue
+		pair_path=$(relay_pair_for_digest "$digest") || true
+		[ -n "${pair_path:-}" ] || continue
+		printf '%s\t%s\n' "$digest" "$pair_path" >>"$pairs"
+	done <"$paircandidates"
+
+	# A pair bridge for a project the sandbox no longer has open is stopped, so a
+	# long-running watcher does not leave sockets behind.
+	for record in "$records_dir"/pair-*; do
+		[ -f "$record" ] || continue
+		digest=${record##*/pair-}
+		grep -q "^$digest$tab" "$pairs" && continue
+		stop_pair_bridge "$digest"
+	done
+
 	# Stop endpoints for projects the sandbox no longer has open, so that a
 	# watcher left running for a long time does not accumulate bound ports. An
 	# MCP record is keyed "mcp-<digest>", so both kinds name the same project
@@ -479,6 +628,9 @@ relay_pass() {
 	for record in "$records_dir"/*; do
 		[ -f "$record" ] || continue
 		name=${record##*/}
+		case $name in
+		pair-*) continue ;;
+		esac
 		digest=${name#mcp-}
 		grep -q "^$digest$tab" "$wanted" && continue
 		# The record is "<port> <pid>"; the pid is the field to signal.
@@ -494,10 +646,10 @@ relay_pass() {
 		rm -f "$record"
 	done
 
-	python3 - "$host_dir" "$instances_dir" "$relays" <<-'PY'
+	python3 - "$host_dir" "$instances_dir" "$relays" "$pairs" <<-'PY'
 		import glob, hashlib, json, os, sys
 
-		host_dir, instances_dir, relays_path = sys.argv[1], sys.argv[2], sys.argv[3]
+		host_dir, instances_dir, relays_path, pairs_path = sys.argv[1:5]
 
 		# "<digest>\t<project_path>\t<relay_port>\t<relay_pid>", one line each.
 		served = {}
@@ -530,9 +682,24 @@ relay_pass() {
 		    if digest not in newest or stamp > newest[digest][0]:
 		        newest[digest] = (stamp, info)
 
+		# The pair socket to publish per digest, which is the sandbox-side one the
+		# bridge bound rather than the host path the plugin named: that path names
+		# nothing inside this sandbox, and the CLI dials it for its session token.
+		bridged = {}
+		with open(pairs_path) as handle:
+		    for line in handle:
+		        digest, path = line.rstrip("\n").split("\t", 1)
+		        bridged[digest] = path
+
 		current = {}
 		for digest, (_, info) in newest.items():
 		    info["port"], info["pid"] = served[digest]
+		    if digest in bridged:
+		        info["pair_socket"] = bridged[digest]
+		    else:
+		        # Published without one, the CLI reads the token from the file, which
+		        # is how a plugin below schema 3 still authenticates.
+		        info.pop("pair_socket", None)
 		    current[digest] = info
 
 		# Instance files are named <md5(project_path)>_<pid>.json. A file is stale

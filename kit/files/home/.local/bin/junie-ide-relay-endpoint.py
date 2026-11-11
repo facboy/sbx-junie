@@ -14,6 +14,12 @@ binds a port the IDE picks (`mcp <digest> <secret>` to the daemon). That endpoin
 has to own that exact port rather than choose one, since the CLI builds the
 server's URL itself as `http://localhost:<port>/stream`.
 
+With `--unix` and `--pair` the endpoint binds a Unix socket instead of a port and
+opens every connection with `pair <digest> <secret>`. That is the IDE plugin's
+pair socket, which the CLI dials to obtain the RPC token: the plugin's own socket
+is a host path the sandbox cannot reach, so this publishes one of the same shape
+inside the sandbox and the daemon splices it.
+
 Written in Python rather than as a `socat SYSTEM:` one-liner: the shell pipeline
 that form needs buffers the reply until its input reaches EOF, which stalls any
 client that keeps its write side open -- which Junie's own requests do.
@@ -27,6 +33,7 @@ import threading
 
 PREAMBLE_FORMAT = "JUNIE-RELAY 1 %s %s\n"
 MCP_PREAMBLE_FORMAT = "JUNIE-RELAY 1 mcp %s %s\n"
+PAIR_PREAMBLE_FORMAT = "JUNIE-RELAY 1 pair %s %s\n"
 IDLE_TIMEOUT = 600
 
 
@@ -122,12 +129,37 @@ def bind(port):
     return listeners
 
 
+def bind_unix(path):
+    """A listening Unix socket at `path`.
+
+    A file left at that path by an endpoint that died without unlinking it would
+    make `bind` fail, so it is removed first: the launcher starts one endpoint
+    per project, and it has already checked that none is live.
+    """
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(path)
+        listener.listen(64)
+    except OSError:
+        listener.close()
+        raise
+    return [listener]
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--port", type=int, required=True, help="loopback port to listen on")
+    parser.add_argument("--port", type=int, default=None, help="loopback port to listen on")
+    parser.add_argument("--unix", default="", metavar="PATH",
+                        help="Unix socket to listen on instead of a port")
     parser.add_argument("--digest", required=True, help="md5 of the project path this endpoint serves")
     parser.add_argument("--mcp", action="store_true",
                         help="serve the IDE's built-in MCP server rather than its RPC")
+    parser.add_argument("--pair", action="store_true",
+                        help="serve the IDE plugin's pair socket rather than its RPC")
     parser.add_argument("--host", required=True, help="host the relay daemon runs on")
     parser.add_argument("--host-port", type=int, required=True, help="the relay daemon's port")
     parser.add_argument("--record", required=True,
@@ -135,6 +167,10 @@ def main(argv):
                              "launcher polls it to tell a bound endpoint from one "
                              "whose port was already taken")
     args = parser.parse_args(argv)
+
+    if bool(args.unix) == (args.port is not None):
+        sys.stderr.write("junie-ide-relay-endpoint: name one of --port or --unix\n")
+        return 2
 
     # Read from the environment rather than a flag, so the secret stays out of the
     # process list that `is_our_endpoint` and any local process can read.
@@ -144,16 +180,28 @@ def main(argv):
                          "so the daemon would refuse every preamble\n")
         return 1
     try:
-        listeners = bind(args.port)
+        listeners = bind_unix(args.unix) if args.unix else bind(args.port)
     except OSError as err:
-        sys.stderr.write("junie-ide-relay-endpoint: port %d: %s\n" % (args.port, err))
+        sys.stderr.write("junie-ide-relay-endpoint: %s: %s\n"
+                         % (args.unix or "port %d" % args.port, err))
         return 1
     # Not named `handle`: that is the module-level connection handler above, and
     # a local of the same name would shadow it at the thread target below.
+    #
+    # The record's first field is the port, or the socket path for a Unix one,
+    # and the second is the pid: the launcher polls the file to tell a bound
+    # endpoint from one whose port was already taken, and matches the endpoint
+    # by these fields before signalling it.
     with open(args.record, "w") as record:
-        record.write("%d %d\n" % (args.port, os.getpid()))
+        record.write("%s %d\n" % (args.unix or args.port, os.getpid()))
 
-    preamble = (MCP_PREAMBLE_FORMAT if args.mcp else PREAMBLE_FORMAT) % (args.digest, secret)
+    if args.pair:
+        preamble = PAIR_PREAMBLE_FORMAT
+    elif args.mcp:
+        preamble = MCP_PREAMBLE_FORMAT
+    else:
+        preamble = PREAMBLE_FORMAT
+    preamble = preamble % (args.digest, secret)
     while True:
         try:
             readable, _, _ = select.select(listeners, [], [])

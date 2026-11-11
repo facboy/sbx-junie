@@ -1,5 +1,8 @@
 """Tests for the sandbox-side relay endpoint."""
+import os
+import shutil
 import socket
+import tempfile
 import unittest
 
 from tests.scripts import endpoint
@@ -54,6 +57,24 @@ class BindTest(unittest.TestCase):
                 endpoint.bind(0)
         finally:
             endpoint.socket.socket = real
+
+    def test_a_unix_listener_replaces_the_file_a_dead_endpoint_left(self):
+        # The launcher starts one endpoint per project, having checked that none is
+        # live, so a socket file a killed endpoint left must not block the bind.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        path = os.path.join(directory, "pair.sock")
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(path)
+        stale.close()
+
+        listeners = endpoint.bind_unix(path)
+        self.addCleanup(lambda: [listener.close() for listener in listeners])
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(client.close)
+        client.connect(path)
+        connected, _ = listeners[0].accept()
+        connected.close()
 
 
 if __name__ == "__main__":

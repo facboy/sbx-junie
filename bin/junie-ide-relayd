@@ -11,6 +11,12 @@ the secret it was provisioned with; the daemon resolves the digest to the IDE's
 current port from the host's instance files, checks the secret against the
 project it authorises, and splices the connection through.
 
+The IDE plugin's pair socket is reached the same way, on `pair <digest>
+<secret>`: the CLI dials the socket path its instance file names to obtain the
+session token, and that path is the plugin's own host path, which no sandbox can
+reach. The sandbox-side relay binds a socket of its own and the daemon splices
+it to the plugin's.
+
 The IDE's built-in MCP server is reached the same way, on a preamble of its own:
 the CLI builds that server's URL itself as `http://localhost:<port>/stream`,
 from a port the plugin hands back over its RPC. That address is the sandbox's own
@@ -134,12 +140,17 @@ PREAMBLE_PREFIX = b"JUNIE-RELAY 1 "
 # health reply and publishes nothing against a daemon that names a lower one or
 # none, since a daemon without the banner closes an MCP preamble silently, and one
 # below 3 splices whatever project a caller names instead of checking a secret.
-PROTOCOL_VERSION = 3
+# 4 adds the `pair` preamble; a daemon below it closes that one silently, which
+# the CLI reads as an IDE that will not pair.
+PROTOCOL_VERSION = 4
 HEALTH_PAYLOAD = b"health"
 HEALTH_REPLY = ("JUNIE-RELAY 1 ok %d\n" % PROTOCOL_VERSION).encode()
 MCP_CREDENTIALS_METHOD = "JunieMcpService.getBuiltInMcpServerCredentials"
 MCP_PORT_PREFIX = b"mcp-port "
 MCP_PREFIX = b"mcp "
+# The IDE plugin's pair socket, which the CLI dials for its session token. Its
+# own path is on the host, so the sandbox binds one and this splices it.
+PAIR_PREFIX = b"pair "
 MCP_PORT_REPLY = b"JUNIE-RELAY 1 mcp-port %d\n"
 MCP_PORT_NONE = b"JUNIE-RELAY 1 mcp-port none\n"
 # The IDE behind the digest is gone, distinct from `none`: the plugin was asked
@@ -427,6 +438,22 @@ def project_for_digest(instances_dir, digest):
         return None
     project = resolved[1].get("project_path")
     return project if isinstance(project, str) else None
+
+
+def pair_socket_for_digest(instances_dir, digest):
+    """The pair socket the instance file naming `digest` publishes, or None.
+
+    Schema 3 replaced the per-file `rpc_token` with this socket: the CLI connects
+    to it and asks for a token, so an instance file naming one is authenticated
+    over that socket rather than by a token read from the file. A plugin below
+    schema 3 writes no `pair_socket` and still publishes a token, which is why
+    None here is a working configuration rather than a fault.
+    """
+    resolved = instance_for_digest(instances_dir, digest)
+    if resolved is None:
+        return None
+    path = resolved[1].get("pair_socket")
+    return path if isinstance(path, str) and path else None
 
 
 # What a secret, or the directory holding one, may grant beyond its owner: none.
@@ -1556,6 +1583,36 @@ def relay_rpc(conn, instances_dir, digest):
     splice_to(conn, port, digest)
 
 
+def relay_pair(conn, instances_dir, digest):
+    """Splice a connection to the IDE plugin's pair socket behind `digest`.
+
+    The CLI dials the socket path its instance file names, which is the plugin's
+    own host path: unreachable from a sandbox, so the sandbox-side endpoint
+    binds a path of its own and this reaches the real one. Resolved per
+    connection, since the plugin names a new path each time the IDE starts.
+    """
+    path = pair_socket_for_digest(instances_dir, digest)
+    if path is None:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: no pair socket for digest %s\n" % digest)
+        return
+    try:
+        upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            upstream.connect(path)
+        except OSError:
+            upstream.close()
+            raise
+    except OSError:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: %s names a pair socket nothing listens on: %s\n"
+                         % (digest, path))
+        return
+    upstream.settimeout(None)
+    conn.settimeout(None)
+    splice(conn, upstream)
+
+
 def authenticate(conn, secrets_dir, instances_dir, payload):
     """The digest an authenticated preamble names, or None after closing it.
 
@@ -1603,6 +1660,11 @@ def handle(conn, instances_dir, secrets_dir, allow_state):
         digest = authenticate(conn, secrets_dir, instances_dir, payload[len(MCP_PREFIX):])
         if digest is not None:
             relay_mcp(conn, instances_dir, digest, allow_state)
+        return
+    if payload.startswith(PAIR_PREFIX):
+        digest = authenticate(conn, secrets_dir, instances_dir, payload[len(PAIR_PREFIX):])
+        if digest is not None:
+            relay_pair(conn, instances_dir, digest)
         return
     digest = authenticate(conn, secrets_dir, instances_dir, payload)
     if digest is not None:
