@@ -320,6 +320,96 @@ Inside the sandbox the secret is not what separates processes from each other: t
 own endpoint at `127.0.0.1:27183` forwards its preamble with the secret for any local caller.
 The secret separates one sandbox from another on the host, which is what it is for.
 
+### 11. A project symlink reaches the host, and the check is lexical — fixed
+
+Found in a second pass. Findings 4, 6, 9 and 10 all rest on a boundary that one symlink
+crosses, because the IDE's project-containment check compares the path it was handed rather
+than where that path lands, and the project is shared with the host writable.
+
+```console
+$ ln -s /home/chrisng/.ssh <project>/.p-ssh
+
+# a plain host path is refused, as designed
+read_file  /home/chrisng/.ssh/id_ed25519
+  → File /home/chrisng/.ssh/id_ed25519 is outside project, library, and SDK roots
+
+# the same file through the project symlink is read whole
+read_file  <project>/.p-ssh/id_ed25519
+  → L1: -----BEGIN OPENSSH PRIVATE KEY----- … END OPENSSH PRIVATE KEY
+```
+
+The read is the host's, not the sandbox's: `/etc/hostname` is `localhost.localdomain` inside,
+and an IDE read through a project symlink to it returned `Jenna3`. Write follows the same
+path — `create_new_file` reported `[success]` for `<project>/.p-ssh/authorized_keys.probe`,
+`read_file` read it back, and `apply_patch` deleted it.
+
+Two directories the design treats as unreachable from the sandbox were reached the same way:
+
+```console
+list_directory_tree <project>/.p-secrets
+  → 3f4c8a….json, 4cb59fc9….json (coffee-cards), 522ef018….json, 9451a767….json, f0537e80….json
+
+read_file <project>/.p-secrets/4cb59fc9….json
+  → {"project_path": "/home/chrisng/git/coffee-cards", "secret": "edddc637…"}
+
+JUNIE-RELAY 1 mcp-port 4cb59fc9… edddc637…  →  JUNIE-RELAY 1 mcp-port 64562
+```
+
+So finding 4's "`relay-secrets` is not mounted into the sandbox" held for mounting and not for
+reading: the disclosed secret was live against the relay for another project's digest. And the
+mount approval was forgeable, which is why finding 4's fix did not hold:
+
+```console
+create_new_file <project>/.p-appr/f0537e80….json
+  with {"project_path": "<project>", "mounts": ["/tmp/junie-sbx-approval-probe"]}
+  → [success]                     # in the operator's real approval store
+
+# no record: refused; forged record present, no JUNIE_SBX_APPROVE_MOUNTS: mounted
+$ junie-sbx.sh ; echo $?
+0
+```
+
+`JunieEditService.applyPatch` on the RPC channel is the same escape with no tool allowlist in
+front of it, which is what makes finding 7 more than a hygiene issue.
+
+The gate is in `junie-ide-relayd`, because the daemon is the only process that resolves a path
+the way the IDE will — the sandbox's `realpath` resolves `~/.ssh` to a path that does not exist
+there. `TOOL_PATH_ARGS` names the parameter each tool carries a path in, `escapes` resolves it
+with `realpath` against the project the digest resolves to, and a call that lands outside is
+refused with `-32602` before the IDE sees it. `apply_patch` is gated on the paths in its body
+and `execute_tool` on the path its parsed command names. An in-project symlink whose target is
+in the project still works, so `node_modules/.bin` keeps working. `DEFAULT_ALLOW_RPC` closes
+the RPC route. `tests/test_relayd.py` covers each shape, asserts the IDE is sent nothing on a
+refusal, and fails when a tool whose schema has a path-like parameter is missing from the table.
+
+### 12. The overlay fallback is not verified before use — fixed, not observed
+
+`merge_overlay` treats a failed overlay as harmless: "the merged directory is then empty and
+the sandbox keeps its own cache". That is not what a failed overlay leaves. The merged path is
+made with `mkdir -p` whether or not a mount follows, so the path the sandbox is handed as its
+writable cache is whatever that directory is: the lower tree mounted read-write, or a plain
+directory under the state root. The script never checked which, so a merge that did not happen
+was mounted and used exactly like one that did.
+
+Both mechanisms that make the merge can fail while reporting success — `fuse-overlayfs` may
+exit 0 without mounting, and `sudo mount -t overlay` was never checked at all. That is a real
+gap on the evidence of the code, and closing it is what finding 12's fix does.
+
+What this evaluation did **not** establish is that the failure occurs on this host. The
+measurement offered for it was taken from inside a sandbox, where `/proc/self/mountinfo`
+reports the merged paths as `sbx`-provided virtiofs shares with tag `none`, and where the state
+directory is the container's own root rather than the host's. Those numbers cannot show what
+the host's overlay did, and on the host the merge is in force: `upper` and `work` are present
+and `merged` is a distinct overlay mount. The sandbox-side `stat` and marker tests in an
+earlier draft of this finding are withdrawn.
+
+`merge_overlay` now verifies that the merge is really an overlay before the tree is mounted
+read-write: `upper` and `work` exist and the merged path is its own mount naming its
+`upperdir=`. When it is not, the mount entry carries `:ro` and a warning names `fuse-overlayfs`
+as the fix, so a cold write fails visibly instead of reaching the host. The run still finishes.
+That is a guard against a state nobody has demonstrated here, which is the right shape for a
+check whose failure mode is silent.
+
 ## What holds
 
 - **The per-project secret.** Presenting this sandbox's secret: own digest → `mcp-port 64562`;
@@ -336,10 +426,13 @@ The secret separates one sandbox from another on the host, which is what it is f
 - **Bounded reads and deadlines**: `MAX_HEAD`, `MAX_MESSAGE`, `PREAMBLE_TIMEOUT`, `IDLE_TIMEOUT`,
   `REAP_TIMEOUT`, `OWED_LIMIT`, and a per-connection guard that keeps one failure from ending
   the daemon.
-- **`relay-secrets` is not mounted into the sandbox**, which is what keeps finding 4 from
-  being immediately exploitable.
-- **81 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
-  covers batch, notification, chunked, dispatcher and unparseable shapes.
+- **`relay-secrets` is not mounted into the sandbox.** Reading it through a project symlink was
+  finding 11, so the mount is one of two things that keep finding 4 from being exploitable; the
+  path gate is the other.
+- **130 tests pass** under `python3 -B -m unittest discover -s tests`, and the allowlist table
+  covers batch, notification, chunked, dispatcher and unparseable shapes, the path gate covers each
+  tool shape and escape shape, the RPC allowlist covers forwarded and refused methods, and a
+  coverage test fails when a path-bearing tool is missing from the gate's table.
 
 ## Priority
 
@@ -358,12 +451,25 @@ The secret separates one sandbox from another on the host, which is what it is f
    allow-set and the daemon's policy preset rather than replacing either, that `deny-all` is
    where it is the whole surface, and that `sbx policy ls` reports the composition. The `403`
    also names `sbx policy approval ls`, which the README does not.
-4. **Narrow the `~/.junie` view** to `AGENTS.md`, `docs/`, `tools/` and this project's
-   sessions. Other projects' transcripts are not part of this project's sandbox.
-5. **Filter the RPC relay** the way the MCP relay is filtered, or state that it is
-   unmediated by design and why that survives a plugin that adds a method.
-6. **Replace the `execute_tool` first-word check** with a check on the dispatched tool and its
-   arguments, and settle the `read_*`/`get_*` question `docs/review.md` left open.
+4. ~~**Narrow the `~/.junie` view** to `AGENTS.md`, `docs/`, `tools/` and this project's
+   sessions. Other projects' transcripts are not part of this project's sandbox.~~ — done:
+   `init_junie_home` links a session only when `index.jsonl` maps its `sessionId` to this
+   project's `projectDir`. The measured view was 89 session directories: 1 this project's, 17
+   known to be other projects', and 71 with no index entry. All but this project's are now
+   left unlinked, so the failure mode is a session that stops being reachable rather than
+   another project's transcript being readable.
+5. ~~**Filter the RPC relay** the way the MCP relay is filtered, or state that it is
+   unmediated by design and why that survives a plugin that adds a method.~~ — done, and the
+   finding understated it: the plugin's dispatch surface is 20 services and 51 methods, not
+   one, and the CLI drives most of them. `DEFAULT_ALLOW_RPC` names the methods that read state
+   only, and everything else is answered by the daemon with `-32601`. `JunieEditService.applyPatch`
+   is the one that mattered: a project write carrying its own paths, so it bypassed both the tool
+   allowlist and the path gate, and a project symlink reached the host through it exactly as
+   through `read_file`.
+6. ~~**Replace the `execute_tool` first-word check** with a check on the dispatched tool and its
+   arguments, and settle the `read_*`/`get_*` question `docs/review.md` left open.~~ — done:
+   the command is parsed and the dispatched tool's path parameter checked, and the `read_*`
+   question is answered in [the finding below](#11-a-project-symlink-reaches-the-host-and-the-check-is-lexical).
 
 ## Not verified
 

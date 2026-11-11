@@ -666,10 +666,27 @@ holds, its writer thread, the `1003h` → `1002h` rewrite with `1003l` passing t
 flush before the terminal is restored, and the exit-status and signal propagation are all
 correct.
 
-One question the code cannot answer from here: `DEFAULT_ALLOW_TOOLS` grants `read_*`,
-`list_*` and `get_*`. A `read_*` tool on the built-in server that reads a host path outside
-the project would give the sandbox a host read through the allowlist rather than through the
-payload the list is drawn against.
+The question that stood open here — `DEFAULT_ALLOW_TOOLS` grants `read_*`, `list_*` and
+`get_*`, so a `read_*` tool that resolves a host path outside the project would give the
+sandbox a host read through the allowlist — is answered, and the answer is worse than the
+question assumed. `read_file` refuses a plain host path (`/home/chrisng/.ssh/id_ed25519`
+→ "outside project, library, and SDK roots"), but the check compares the name it was handed
+rather than where that name lands. The project is shared with the host writable, so a symlink
+in it is followed on the host: `read_file <project>/.p-ssh/id_ed25519` returned a complete
+private key, and a project symlink to `/etc/hostname` returned the host's name where the
+sandbox's is `localhost.localdomain`. `create_new_file` and `apply_patch` wrote to the host
+through the same link, and the same technique reached `relay-secrets` and `mount-approvals`,
+which the design treats as unreachable from the sandbox.
+
+The gate that closes it is in the daemon rather than in the IDE or the sandbox, because the
+daemon is the only one of the three that resolves a path the way the IDE will:
+`TOOL_PATH_ARGS` names the parameter each tool carries a path in, `escapes` resolves it with
+`realpath` against the project the digest resolves to, and a call that lands outside is
+refused with `-32602` before the IDE sees it. `apply_patch` is gated on the paths in its body,
+since its schema shows only `projectPath`, and `execute_tool` on the path its parsed command
+names rather than on its first word. `tests/test_relayd.py` drives each shape, including that
+the IDE is sent nothing on a refusal, and fails when a tool whose schema has a path-like
+parameter is missing from the table.
 
 ### Priority for this pass
 

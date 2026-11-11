@@ -45,8 +45,10 @@ daemon, since a sandbox that already exists keeps the agent it was started with.
 sandbox the daemon serves; `JUNIE_SBX_KEEP_SSH_AGENT=1` skips the step.
 
 `junie-sbx.sh` sets up each project's Junie home at the start of every run — the three read-only
-links and the host's sessions — without prompting, so it works unattended and a host session
-recorded after the first run is picked up by the next.
+links and this project's host sessions — without prompting, so it works unattended and a session
+recorded after the first run is picked up by the next. Only the sessions `~/.junie/sessions/index.jsonl`
+maps to this project are linked: the view holds every project's transcripts, so linking all of them
+would put another project's history in this sandbox.
 
 ## Building the image
 
@@ -119,8 +121,11 @@ environment variable rather than by copying them somewhere else:
   image's job, not this one ([Browser libraries](#browser-libraries)).
 
 Overlays are created on the host, since a sandbox cannot mount. They need either `fuse-overlayfs`
-or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and the sandbox caches
-locally instead.
+or passwordless `sudo`; without one of those, `junie-sbx.sh` says so and mounts the cache trees
+read-only. `fuse-overlayfs` can also exit successfully without mounting anything, so the script
+checks that the merge really is an overlay before mounting it writable: a tree with no overlay is
+mounted `:ro` and named on stderr, which makes a cold `uv` or `pnpm` write fail visibly instead of
+landing in your host cache.
 
 ## Browser libraries
 

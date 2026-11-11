@@ -291,12 +291,14 @@ init_junie_home() {
 	fi
 
 	# The host's session directories, linked on every run so one recorded after
-	# setup is reachable too. A name the home holds as a real directory is the
-	# sandbox's own session, and is left alone; `-n` keeps the link in
-	# `sessions/` when the name is already a symlink to a directory.
+	# setup is reachable too, and only this project's: `~/.junie` holds every
+	# project's transcripts, and a sandbox holding one project must not read
+	# another's. `index.jsonl` maps a session to the project that recorded it, so
+	# a session it does not map is not linked.
 	local session
 	for session in "${DOT_JUNIE_RO}"/sessions/session-*; do
 		[[ -e "${session}" ]] || continue
+		this_project_session "${session##*/}" || continue
 		if [[ -e "${JUNIE_HOME}/sessions/${session##*/}" &&
 			! -L "${JUNIE_HOME}/sessions/${session##*/}" ]]; then
 			continue
@@ -305,18 +307,54 @@ init_junie_home() {
 	done
 }
 
+# Whether the host's `index.jsonl` maps `session` to this project. Read from the
+# read-only view, which is the host's own file, and compared on the resolved
+# project path so a session recorded through a symlink still matches.
+this_project_session() {
+	python3 - "${DOT_JUNIE_RO}/sessions/index.jsonl" "$1" "${PWD}" <<-'PY'
+		import json, os, sys
+
+		index, session, project = sys.argv[1], sys.argv[2], sys.argv[3]
+		wanted = os.path.realpath(project)
+		try:
+		    with open(index) as handle:
+		        for line in handle:
+		            line = line.strip()
+		            if not line:
+		                continue
+		            try:
+		                entry = json.loads(line)
+		            except ValueError:
+		                continue
+		            if entry.get("sessionId") != session:
+		                continue
+		            recorded = entry.get("projectDir")
+		            if isinstance(recorded, str) and os.path.realpath(recorded) == wanted:
+		                raise SystemExit(0)
+		except OSError:
+		    pass
+		raise SystemExit(1)
+	PY
+}
+
 # Overlays lower onto a per-project upper layer, leaving the merged path in
 # MERGED_PATH. Mounting needs CAP_SYS_ADMIN, which the host provides through
-# either fuse-overlayfs (FUSE, no root) or passwordless sudo. Failure is not
-# fatal: the merged directory is then empty and the sandbox keeps its own cache
-# and store there, having reused nothing.
+# either fuse-overlayfs (FUSE, no root) or passwordless sudo.
+#
+# A path the overlay did not really cover is mounted read-only instead, never
+# read-write. `fuse-overlayfs` can exit 0 without mounting, and a mount that
+# silently did nothing leaves the merged path as the host's own cache directory:
+# a sandbox write then lands in the host's `~/.cache`, which is the one thing the
+# overlay exists to prevent. OVERLAY_RO records which of the two happened, so the
+# mount entry carries `:ro` when the overlay is absent.
 merge_overlay() {
 	local lower="$1" base="${OV_ROOT}/$2" opts
 	MERGED_PATH="${base}/merged"
+	OVERLAY_RO=""
 	mkdir -p "${base}/upper" "${base}/work" "${MERGED_PATH}"
 
 	[[ -d "${lower}" ]] || return 0
-	if grep -qF " ${MERGED_PATH} " /proc/self/mounts; then
+	if overlay_in_force "${base}" "${MERGED_PATH}"; then
 		return 0
 	fi
 
@@ -330,6 +368,45 @@ merge_overlay() {
 	else
 		echo "junie-sbx: cannot overlay ${lower}: install fuse-overlayfs or allow passwordless sudo" >&2
 	fi
+
+	# Only a mount this call made counts, and only if it is really an overlay:
+	# `fuse-overlayfs` can report success and mount nothing, and a merged path
+	# with no overlay under it is the lower tree itself.
+	if ! overlay_in_force "${base}" "${MERGED_PATH}"; then
+		OVERLAY_RO=":ro"
+		echo "junie-sbx: ${lower} has no overlay, so it is mounted read-only:" >&2
+		echo "  writes there fail instead of being layered over the tree below." >&2
+		echo "  Install fuse-overlayfs (or allow passwordless sudo) to make it writable." >&2
+	fi
+}
+
+# Whether `merged` is a distinct overlay mount for this project's layers. A merged
+# directory that is not its own mount, or whose mount is not an overlay, is the
+# lower tree itself and is not the merge this run asked for.
+#
+# The filesystem type decides it, not the mount options: `mount -t overlay`
+# reports `overlay`, and `fuse-overlayfs` reports `fuse.fuse-overlayfs` -- its
+# options live in the fuse process, so `upperdir=` never appears in the line. A
+# trailing separator is stripped first, since `mountinfo` names a mount point
+# without one.
+overlay_in_force() {
+	local base="$1" merged="${2%/}" entry fstype
+	[[ -d "${base}/upper" && -d "${base}/work" ]] || return 1
+	entry="$(awk -v m="${merged}" '$5 == m {print}' /proc/self/mountinfo)"
+	[[ -n "${entry}" ]] || return 1
+	# The type is the field after the `-` separator, which is the only stable
+	# position: a mount with no source shifts the fields after it.
+	fstype="$(printf '%s\n' "${entry}" | awk '{for (i = 1; i <= NF; i++) if ($i == "-") { print $(i + 1); exit }}')"
+	case "${fstype}" in
+		overlay)
+			# The options are visible for this one, so this project's own upper
+			# is worth confirming when they name one.
+			[[ "${entry}" == *"upperdir="* && "${entry}" != *"upperdir=${base}/upper"* ]] && return 1
+			return 0
+			;;
+		fuse.*overlay*) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 # The Junie home links AGENTS.md, docs and tools out of the read-only view
@@ -350,25 +427,39 @@ init_junie_home
 
 # Only a tree its switch left on is overlaid and mounted; an off tree is absent
 # from the sandbox entirely, so its cache and store stay the host's alone.
+#
+# Each merged tree is mounted read-write only when its overlay is really in force.
+# Without one the merged path is the host tree itself, so the entry carries `:ro`
+# and the sandbox's write fails instead of landing in the host's cache.
 UV_CACHE_MERGED=""
 UV_TOOLS_MERGED=""
 PNPM_CACHE_MERGED=""
 PNPM_MERGED=""
 PW_CACHE_MERGED=""
+UV_CACHE_RO=""
+UV_TOOLS_RO=""
+PNPM_CACHE_RO=""
+PNPM_RO=""
+PW_CACHE_RO=""
 
 if [[ "${UV_ON}" == 1 ]]; then
 	merge_overlay "${USER_UV_CACHE}" uv-cache
 	UV_CACHE_MERGED="${MERGED_PATH}"
+	UV_CACHE_RO="${OVERLAY_RO}"
 	merge_overlay "${USER_UV}/tools" uv-tools
 	UV_TOOLS_MERGED="${MERGED_PATH}"
+	UV_TOOLS_RO="${OVERLAY_RO}"
 fi
 if [[ "${PNPM_ON}" == 1 ]]; then
 	merge_overlay "${USER_PNPM_CACHE}" pnpm-cache
 	PNPM_CACHE_MERGED="${MERGED_PATH}"
+	PNPM_CACHE_RO="${OVERLAY_RO}"
 	merge_overlay "${USER_PNPM}" pnpm
 	PNPM_MERGED="${MERGED_PATH}"
+	PNPM_RO="${OVERLAY_RO}"
 	merge_overlay "${USER_PW_CACHE}" ms-playwright
 	PW_CACHE_MERGED="${MERGED_PATH}"
+	PW_CACHE_RO="${OVERLAY_RO}"
 fi
 
 MOUNTS=(
@@ -390,14 +481,14 @@ add_mount() {
 
 if [[ "${UV_ON}" == 1 ]]; then
 	add_mount "${USER_UV}" ":ro"
-	add_mount "${UV_CACHE_MERGED}" ""
-	add_mount "${UV_TOOLS_MERGED}" ""
+	add_mount "${UV_CACHE_MERGED}" "${UV_CACHE_RO}"
+	add_mount "${UV_TOOLS_MERGED}" "${UV_TOOLS_RO}"
 fi
 if [[ "${PNPM_ON}" == 1 ]]; then
 	add_mount "${USER_FNM}" ":ro"
-	add_mount "${PNPM_CACHE_MERGED}" ""
-	add_mount "${PNPM_MERGED}" ""
-	add_mount "${PW_CACHE_MERGED}" ""
+	add_mount "${PNPM_CACHE_MERGED}" "${PNPM_CACHE_RO}"
+	add_mount "${PNPM_MERGED}" "${PNPM_RO}"
+	add_mount "${PW_CACHE_MERGED}" "${PW_CACHE_RO}"
 fi
 
 # The project's own mounts from `.junie/sbx.toml` follow the built-in ones.

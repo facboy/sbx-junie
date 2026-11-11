@@ -116,7 +116,9 @@ import hmac
 import http.client
 import json
 import os
+import re
 import select
+import shlex
 import signal
 import socket
 import sys
@@ -192,8 +194,78 @@ DEFAULT_ALLOW_TOOLS = (
     "search_*",
     "test_database_connection",
 )
+# What the plugin may be asked for over the RPC relay, as exact method names. The
+# plugin's dispatch surface is 15 advertised services with 51 methods between
+# them, not the one method this daemon itself calls, and the CLI drives most of
+# them. The set below reads state and cannot write the project or name a host
+# path; everything else -- every `applyPatch`, build, run, test, refactor and
+# navigation call -- is answered by the daemon instead of reaching the plugin.
+#
+# `initialize` is not an optional extra: it is the handshake that returns the
+# service list, the project id and the protocol version, and the CLI calls it
+# once per connection. Refusing it does not narrow the channel, it breaks it.
+#
+# `JunieEditService.applyPatch` is why this exists: it is a project write that
+# carries its own paths, so it bypasses both the tool allowlist and `refused_path`,
+# and a project symlink reaches the host through it exactly as it does through
+# `read_file`. A method a later plugin adds is not named here, so it is refused
+# until someone reviews it. See "RPC methods" in ../README.md.
+DEFAULT_ALLOW_RPC = (
+    "initialize",
+    "JunieMcpService.getBuiltInMcpServerCredentials",
+    "JunieSystemService.getProductName",
+    "JunieSystemService.getQuotaInfo",
+    "JunieSystemService.getFusConsent",
+    "JunieSystemService.getProgrammingLanguageGuidelines",
+    "JunieSystemService.getIdeLogs",
+    "JunieEditorStateService.getEditorContext",
+    "JunieIdeSyncService.markDirty",
+    "JunieIdeSyncService.markDirtyAll",
+    "JunieChroniclesService.getUserHistory",
+)
 DISPATCHER_TOOL = "execute_tool"
 TOOL_LIST_MARKER = "Available tools: "
+
+# The argument each tool carries a project path in. A path argument is resolved
+# here, on the host, because that is where the IDE resolves it: the project is
+# agent-writable, so a symlink in it reaches any host path the IDE user can read,
+# and the IDE's own containment check compares the name it was given rather than
+# where that name lands. The values are parameter names, or dotted names for a
+# nested one; `paths` is a list, and every member is checked.
+#
+# A tool not named here is not path-gated. `test_relayd.py` fails when a tool
+# whose schema has a path-like parameter is missing from this table, so a tool a
+# later IDE build adds stops the suite rather than the gate.
+TOOL_PATH_ARGS = {
+    "read_file": ("file_path",),
+    "create_new_file": ("pathInProject",),
+    "list_directory_tree": ("directoryPath",),
+    "open_file_in_editor": ("filePath",),
+    "get_file_problems": ("filePath",),
+    "get_symbol_info": ("filePath",),
+    "get_python_environment": ("filePath",),
+    "get_run_configurations": ("filePath",),
+    "analyze_calls": ("treePath",),
+    "search_file": ("paths",),
+    "search_regex": ("paths",),
+    "search_symbol": ("paths",),
+    "search_text": ("paths",),
+    "rename_refactoring": ("pathInProject",),
+    "create_notebook": ("file_path",),
+    "read_notebook": ("file_path",),
+    "read_notebook_cell": ("file_path",),
+    "edit_notebook": ("file_path",),
+    "get_notebook_state": ("file_path",),
+    "git_status": ("repositoryPathRelativeToProject",),
+}
+# `apply_patch` declares only `projectPath` and carries its real targets in a
+# body, so it is gated by `patch_paths` instead of by the table above.
+PATCH_TOOL = "apply_patch"
+PATCH_PARAM = "input"
+PATCH_PARAM_ALIASES = ("input", "patch")
+# A patch a parser cannot read names no path it can check, so it is refused: the
+# alternative is forwarding a body whose targets were never resolved.
+PATCH_UNREADABLE = "Patch body could not be read"
 # A request body the filter cannot read names no tool it can check, so it is
 # answered rather than forwarded: forwarding it would run whatever it holds.
 PARSE_ERROR_REPLY = (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
@@ -277,7 +349,7 @@ def default_secrets_dir():
 
 
 def read_allow_config(path):
-    """The `allow_tools` list a TOML file names, or None when it names none.
+    """The (`allow_tools`, `allow_rpc`) lists a TOML file names, or None each.
 
     A file that does not exist names none, since it is only one step in a
     search. Anything else wrong with it raises: an unreadable file would
@@ -288,13 +360,18 @@ def read_allow_config(path):
         with open(path, "rb") as handle:
             document = tomllib.load(handle)
     except FileNotFoundError:
-        return None
+        return None, None
     patterns = document.get("allow_tools")
-    if patterns is None:
-        return None
-    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
-        raise ValueError("allow_tools must be a list of tool-name strings")
-    return tuple(patterns)
+    methods = document.get("allow_rpc")
+    if patterns is not None:
+        if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+            raise ValueError("allow_tools must be a list of tool-name strings")
+        patterns = tuple(patterns)
+    if methods is not None:
+        if not isinstance(methods, list) or not all(isinstance(m, str) for m in methods):
+            raise ValueError("allow_rpc must be a list of method-name strings")
+        methods = tuple(methods)
+    return patterns, methods
 
 
 def resolve_allow(config_path, allow_tool, no_tool_filter):
@@ -305,10 +382,26 @@ def resolve_allow(config_path, allow_tool, no_tool_filter):
         return None, "--no-tool-filter"
     if allow_tool is not None:
         return tuple(allow_tool), "--allow-tool"
-    patterns = read_allow_config(config_path)
+    patterns, _ = read_allow_config(config_path)
     if patterns is not None:
         return patterns, config_path
     return DEFAULT_ALLOW_TOOLS, "built-in defaults"
+
+
+def resolve_allow_rpc(config_path, allow_rpc, no_rpc_filter):
+    """The (methods, source) in force for the RPC relay.
+
+    The flags come first, then the config file, then the built-in list, in the
+    same idiom as the tool list. `methods` is None when the filter is off.
+    """
+    if no_rpc_filter:
+        return None, "--no-rpc-filter"
+    if allow_rpc is not None:
+        return tuple(allow_rpc), "--allow-rpc"
+    _, methods = read_allow_config(config_path)
+    if methods is not None:
+        return methods, config_path
+    return DEFAULT_ALLOW_RPC, "built-in defaults"
 
 
 def report_allow(patterns, source):
@@ -317,6 +410,14 @@ def report_allow(patterns, source):
         return
     named = ", ".join(patterns) if patterns else "none -- every call is refused"
     sys.stderr.write("junie-ide-relayd: allowing MCP tools (%s): %s\n" % (source, named))
+
+
+def report_allow_rpc(methods, source):
+    if methods is None:
+        sys.stderr.write("junie-ide-relayd: RPC methods are unfiltered (%s)\n" % source)
+        return
+    named = ", ".join(methods) if methods else "none -- every method is refused"
+    sys.stderr.write("junie-ide-relayd: allowing RPC methods (%s): %s\n" % (source, named))
 
 
 class AllowState:
@@ -329,11 +430,16 @@ class AllowState:
     file, whichever way it was started.
     """
 
-    def __init__(self, config_path, allow_tool, no_tool_filter):
+    def __init__(self, config_path, allow_tool, no_tool_filter,
+                 no_rpc_filter=False, allow_rpc=None):
         self.config_path = config_path
         self.allow_tool = allow_tool
         self.no_tool_filter = no_tool_filter
+        self.no_rpc_filter = no_rpc_filter
+        self.allow_rpc = allow_rpc
         self.patterns, self.source = resolve_allow(config_path, allow_tool, no_tool_filter)
+        self.methods, self.rpc_source = resolve_allow_rpc(config_path, allow_rpc,
+                                                          no_rpc_filter)
 
     def reload(self):
         """Re-read the config, or keep the current list when that fails.
@@ -345,12 +451,16 @@ class AllowState:
         try:
             patterns, source = resolve_allow(self.config_path, self.allow_tool,
                                              self.no_tool_filter)
+            methods, rpc_source = resolve_allow_rpc(self.config_path, self.allow_rpc,
+                                                    self.no_rpc_filter)
         except (OSError, ValueError) as err:
             sys.stderr.write("junie-ide-relayd: keeping the current allowlist: %s: %s\n"
                              % (self.config_path, err))
             return
         self.patterns, self.source = patterns, source
+        self.methods, self.rpc_source = methods, rpc_source
         report_allow(self.patterns, self.source)
+        report_allow_rpc(self.methods, self.rpc_source)
 
 
 def install_reload_handler(state):
@@ -1028,6 +1138,197 @@ def refused_tool(params, allow):
     return words[0] if words else DISPATCHER_TOOL
 
 
+def escapes(path, root):
+    """Whether `path`, resolved on this host, leaves `root`.
+
+    Resolved with `realpath`, because that is how the IDE resolves it. The project
+    is writable from the sandbox, so a symlink in it names any host path the IDE
+    user can read, and the IDE's own containment check compares the name it was
+    handed rather than where that name lands.
+
+    A relative path resolves against `root`, as the IDE resolves it. A path that
+    does not exist yet still has its existing components resolved, so a new file
+    inside the project passes while one created through a symlinked directory
+    does not.
+    """
+    resolved_root = os.path.realpath(root)
+    target = path if os.path.isabs(path) else os.path.join(resolved_root, path)
+    resolved = os.path.realpath(target)
+    return not (resolved == resolved_root
+                or resolved.startswith(resolved_root + os.sep))
+
+
+def path_arguments(arguments, name):
+    """The values a parameter names, as a list: one value, or a list's members.
+
+    A parameter the call omits names no path, which is not the same as naming one
+    that escapes: `get_run_configurations` takes `filePath` optionally.
+    """
+    value = arguments.get(name)
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def refused_path(params, tool, root):
+    """The refusal a call carries for the path it names, or None to forward it.
+
+    `params` is a `tools/call`'s parameters and `root` the project the digest
+    resolves to. A tool from `TOOL_PATH_ARGS` names its path in that argument. A
+    call through `execute_tool` names the tool and its arguments in one command
+    string, so that string is parsed and the target's own path parameter checked:
+    the first word cannot say which path the call will touch.
+
+    Every refusal is fail-closed. A value in a path position that is neither a
+    string nor a list of them names a path this filter cannot resolve, which is
+    refused rather than forwarded.
+    """
+    if not isinstance(params, dict) or root is None:
+        return None
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    names = TOOL_PATH_ARGS.get(tool)
+    if tool == DISPATCHER_TOOL:
+        target, parsed = dispatcher_call(arguments.get("command"))
+        if target is None:
+            return None
+        if target == PATCH_TOOL:
+            # The dispatcher reaches `apply_patch` too, and its target lives in a
+            # body rather than in a parameter.
+            return refused_patch({"name": target, "arguments": parsed}, target, root)
+        names = TOOL_PATH_ARGS.get(target)
+        arguments = parsed
+        if names is None:
+            return None
+    if names is None:
+        return None
+    for name in names:
+        for value in path_arguments(arguments, name):
+            if not isinstance(value, str):
+                return (-32602, "Argument '%s' is not a path this relay can resolve"
+                        % name)
+            if escapes(value, root):
+                return (-32602, "Argument '%s' resolves outside the project" % name)
+    return None
+
+
+def dispatcher_call(command):
+    """The tool and the `--name value` arguments an `execute_tool` command names.
+
+    The dispatcher resolves its tool from the first word and each argument from the
+    `--name value` pair that follows, so the path a call reaches is in those pairs
+    rather than in the command line's prefix. Returns (tool, arguments), or
+    (None, None) for a command whose tool cannot be read.
+    """
+    if not isinstance(command, str):
+        return None, None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None, None
+    if not words:
+        return None, None
+    arguments = {}
+    rest = words[1:]
+    index = 0
+    while index < len(rest):
+        word = rest[index]
+        if word.startswith("--"):
+            key = word[2:]
+            if index + 1 < len(rest):
+                arguments[key] = rest[index + 1]
+                index += 2
+                continue
+            arguments[key] = ""
+        index += 1
+    return words[0], arguments
+
+
+# A path a patch names, in either form the tool documents: the apply-patch header
+# (`*** Add File: x`) and the unified-diff header (`+++ b/x`). A `--- a/x` line
+# names the file being replaced, which is the same target as its `+++ b/x`.
+PATCH_FILE_MARKER = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$")
+PATCH_CONTEXT_MARKER = re.compile(r"^\*\*\* (?:Add|Update|Delete) File:")
+PATCH_DIFF_MARKER = re.compile(r"^(?:---|\+\+\+) ([ab])/(.+?)\s*$")
+# `/dev/null` is how a diff names a side that does not exist: an added file has no
+# `---` side and a deleted one no `+++` side, so neither names a path to check.
+PATCH_NULL = "/dev/null"
+
+
+def patch_paths(body):
+    """The paths a patch body writes to, or None when the body cannot be read.
+
+    `apply_patch` declares only `projectPath`, so its real targets are in this
+    body and nowhere else: a gate that trusted the schema would forward a patch
+    that adds `../../.ssh/authorized_keys`. Both documented forms are parsed --
+    the apply-patch headers and a unified diff.
+
+    A body naming an apply-patch header with no path it could read is refused
+    rather than forwarded: it names a file this parser cannot resolve, which is
+    not the same as a body that names none.
+    """
+    if not isinstance(body, str):
+        return None
+    paths = []
+    unreadable = False
+    # A body arrives either as text or as the string a client put in a `--input`
+    # argument, where a newline is the two characters `\n`. Splitting on both
+    # reads the same patch either way; a file name that really contains `\n`
+    # reads as two paths, which only ever checks more than the one name.
+    for line in re.split(r"\\n|\n", body):
+        marker = PATCH_FILE_MARKER.match(line)
+        if marker:
+            paths.append(marker.group(1))
+            continue
+        if PATCH_CONTEXT_MARKER.match(line):
+            # An Add/Update/Delete header with no path after it.
+            unreadable = True
+            continue
+        diff = PATCH_DIFF_MARKER.match(line)
+        if diff and diff.group(2) != PATCH_NULL:
+            paths.append(diff.group(2))
+    if unreadable:
+        return None
+    return paths
+
+
+def patch_body(arguments):
+    """The patch text a call carries, or None.
+
+    The schema names it `input`, with `patch` as an alias for clients that send
+    that instead. Either one is the body to parse.
+    """
+    for name in PATCH_PARAM_ALIASES:
+        value = arguments.get(name)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def refused_patch(params, tool, root):
+    """The refusal a patch call carries for a target outside `root`, or None."""
+    if tool != PATCH_TOOL or not isinstance(params, dict) or root is None:
+        return None
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    body = patch_body(arguments)
+    if body is None:
+        return None
+    paths = patch_paths(body)
+    if paths is None:
+        return (-32602, PATCH_UNREADABLE)
+    # One escaping target refuses the whole call, as one withheld member refuses a
+    # batch: a patch has no way to drop a file and keep the rest.
+    for path in paths:
+        if escapes(path, root):
+            return (-32602, "Patch target '%s' resolves outside the project" % path)
+    return None
+
+
 def scrub_tool_list(text, allow):
     """The dispatch error's own tool listing, with unlisted names removed."""
     index = text.find(TOOL_LIST_MARKER)
@@ -1276,6 +1577,56 @@ def tool_calls(message):
             if isinstance(member, dict) and member.get("method") == "tools/call"]
 
 
+def requests(message):
+    """The requests a parsed message holds, singly or in a batch.
+
+    The RPC channel filters on the method, and a notification carries one too, so
+    every member that is a JSON object is a request to check. A member that is
+    not an object names no method this filter can read, which is not a request
+    it can pass: it is dropped here and answered by the caller as unreadable.
+    """
+    if isinstance(message, dict):
+        members = [message]
+    elif isinstance(message, list):
+        members = message
+    else:
+        return []
+    return [member for member in members if isinstance(member, dict)]
+
+
+def refusal_body(request_id, error):
+    """The JSON-RPC error reply refusing a call, as `error` describes it.
+
+    `json.dumps`, so a tool name carrying a quote cannot break the body. Used for
+    both refusals the filter makes, so the CLI reads them the same way.
+    """
+    return json.dumps({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": error,
+    }).encode()
+
+
+def refused_method(message, methods):
+    """The reply refusing an RPC method `methods` does not name, or None.
+
+    The RPC channel carries no tool names, so the method is the whole surface: a
+    method the list does not name is the call's own target. `-32601` is the code
+    the plugin answers an unknown method with, so a client that already handles
+    one reports a refusal the same way.
+
+    A request naming no method is refused too: it holds no method this filter can
+    check, which is not the same as one it allows.
+    """
+    name = message.get("method")
+    if not isinstance(name, str) or name not in methods:
+        return refusal_body(message.get("id"),
+                            {"code": -32601,
+                             "message": "Method '%s' is not available"
+                                        % (name if isinstance(name, str) else "")})
+    return None
+
+
 def refused_head(session_id, body, status=b"200 OK"):
     """A reply head carrying `body`, with the session the client is on."""
     head = b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\n"
@@ -1284,7 +1635,7 @@ def refused_head(session_id, body, status=b"200 OK"):
     return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
 
 
-def splice_mcp(client, upstream, allow):
+def splice_mcp(client, upstream, allow, root=None, methods=None):
     """Splice the MCP exchange with everything outside `allow` removed.
 
     A byte splice cannot do this: the tool to remove is named inside a JSON
@@ -1300,6 +1651,18 @@ def splice_mcp(client, upstream, allow):
     `allow` is None when the filter is off, which is not the same as an empty
     list: an empty list names no tool, so every call is refused. Only None
     passes everything through.
+
+    `root` is the project the digest resolves to, and every path argument a call
+    names is resolved against it before the call is forwarded. An allowed tool
+    whose argument leaves the project is refused in the same way a withheld tool
+    is, since the allowlist is drawn against the tool, not against the path it
+    will touch. None means the digest names no project, which relays nothing
+    anyway.
+
+    `methods` is the RPC method allowlist, or None for a channel that filters
+    tools only. The MCP channel filters `tools/call`, and the RPC channel filters
+    the method each request names, so one splice serves both: the parsing, the
+    framing and the refusal shapes are the same, and only the predicate differs.
     """
     client_conn, upstream_conn = HttpConnection(client), HttpConnection(upstream)
     write_lock = threading.Lock()
@@ -1359,23 +1722,40 @@ def splice_mcp(client, upstream, allow):
         timer.start()
 
     def refused_reply(message):
-        """The reply body refusing a withheld tool, or None to forward it.
+        """The reply body refusing a request, or None to forward it.
+
+        The RPC channel refuses a method `methods` does not name, and the MCP
+        channel refuses a tool `allow` withholds and then a path argument that
+        resolves outside the project. Both are `-32601` for the thing the
+        allowlist does not cover, which is the shape the CLI already reports, and
+        `-32602` for an argument, because there the tool is named and the
+        argument is what the call reaches.
 
         An unanswered notification is refused the same way as a request: the IDE
         is not sent the call either, and a reply the client did not ask for is
         the only way to say so. `id` is absent from a notification, so the reply
         carries a null one.
         """
+        if methods is not None:
+            return refused_method(message, methods)
         if message.get("method") != "tools/call":
             return None
         name = refused_tool(message.get("params"), allow)
-        if name is None:
+        if name is not None:
+            return refusal_body(message.get("id"),
+                                {"code": -32601,
+                                 "message": "Tool '%s' is not available" % name})
+        params = message.get("params")
+        if not isinstance(params, dict) or not isinstance(params.get("name"), str):
             return None
-        return json.dumps({
-            "jsonrpc": "2.0",
-            "id": message.get("id"),
-            "error": {"code": -32601, "message": "Tool '%s' is not available" % name},
-        }).encode()
+        name = params["name"]
+        refusal = refused_path(params, name, root)
+        if refusal is None:
+            refusal = refused_patch(params, name, root)
+        if refusal is None:
+            return None
+        return refusal_body(message.get("id"),
+                            {"code": refusal[0], "message": refusal[1]})
 
     def first_refusal(calls):
         """The reply refusing the first call outside `allow`, or None.
@@ -1446,7 +1826,7 @@ def splice_mcp(client, upstream, allow):
                 body = read_body_or_lull(client_conn, headers)
                 if body is None:
                     return
-                if body and allow is not None:
+                if body and (allow is not None or methods is not None):
                     # A chunked body arrives still framed and a batch arrives as
                     # a list; both are decoded here, and a message the filter
                     # cannot read is answered rather than forwarded -- forwarding
@@ -1456,7 +1836,8 @@ def splice_mcp(client, upstream, allow):
                         reply = refused_head(session.get("id"), PARSE_ERROR_REPLY,
                                              b"400 Bad Request")
                     else:
-                        refusal = first_refusal(tool_calls(message))
+                        calls = requests(message) if methods is not None else tool_calls(message)
+                        refusal = first_refusal(calls)
                         if refusal is None:
                             reply = None
                         else:
@@ -1480,7 +1861,8 @@ def splice_mcp(client, upstream, allow):
                     return
                 # A reply the daemon cannot parse cannot be filtered, so the IDE
                 # is asked for one it can read.
-                forwarded_head = head if allow is None else strip_accept_encoding(head)
+                filtered = allow is not None or methods is not None
+                forwarded_head = head if not filtered else strip_accept_encoding(head)
                 try:
                     upstream.sendall(forwarded_head + body)
                 except OSError:
@@ -1641,16 +2023,41 @@ def relay_mcp(conn, instances_dir, digest, allow_state):
         return
     upstream.settimeout(IDLE_TIMEOUT)
     conn.settimeout(IDLE_TIMEOUT)
-    splice_mcp(conn, upstream, allow_state.patterns)
+    # The project the digest resolves to is what a tool's path arguments are
+    # resolved against. It is the IDE's own project, so it is the root the IDE's
+    # containment check means, but resolved here rather than there.
+    splice_mcp(conn, upstream, allow_state.patterns,
+               project_for_digest(instances_dir, digest))
 
 
-def relay_rpc(conn, instances_dir, digest):
+def relay_rpc(conn, instances_dir, digest, allow_state):
+    """Splice the IDE's RPC channel with every method outside the list refused.
+
+    The channel is JSON-RPC over HTTP, like the MCP one, so it is framed the same
+    way: a request naming a method the list does not cover is answered by the
+    daemon and the plugin is never asked to run it. That is what closes
+    `JunieEditService.applyPatch`, which is a project write that bypasses the
+    tool allowlist and the path gate alike.
+    """
     port = port_for_digest(instances_dir, digest)
     if port is None:
         conn.close()
         sys.stderr.write("junie-ide-relayd: no running IDE for digest %s\n" % digest)
         return
-    splice_to(conn, port, digest)
+    methods = allow_state.methods
+    if methods is None:
+        splice_to(conn, port, digest)
+        return
+    try:
+        upstream = socket.create_connection(("127.0.0.1", port), timeout=5)
+    except OSError as err:
+        conn.close()
+        sys.stderr.write("junie-ide-relayd: %s: %s\n" % (digest, err))
+        return
+    upstream.settimeout(IDLE_TIMEOUT)
+    conn.settimeout(IDLE_TIMEOUT)
+    splice_mcp(conn, upstream, None,
+               project_for_digest(instances_dir, digest), methods)
 
 
 def relay_pair(conn, instances_dir, digest):
@@ -1738,7 +2145,7 @@ def handle(conn, instances_dir, secrets_dir, allow_state):
         return
     digest = authenticate(conn, secrets_dir, instances_dir, payload)
     if digest is not None:
-        relay_rpc(conn, instances_dir, digest)
+        relay_rpc(conn, instances_dir, digest, allow_state)
 
 
 def serve(conn, instances_dir, secrets_dir, allow_state):
@@ -1784,11 +2191,18 @@ def main(argv):
                              "and replacing the defaults")
     parser.add_argument("--no-tool-filter", action="store_true",
                         help="relay the IDE's built-in MCP server unfiltered")
+    parser.add_argument("--allow-rpc", action="append", default=None, metavar="METHOD",
+                        help="an RPC method the sandbox may reach, as an exact name; "
+                             "repeatable, overriding the config file and replacing the "
+                             "defaults")
+    parser.add_argument("--no-rpc-filter", action="store_true",
+                        help="relay the IDE's RPC channel unfiltered")
     args = parser.parse_args(argv)
 
     config_path = args.config or default_config_path()
     try:
-        allow_state = AllowState(config_path, args.allow_tool, args.no_tool_filter)
+        allow_state = AllowState(config_path, args.allow_tool, args.no_tool_filter,
+                                 args.no_rpc_filter, args.allow_rpc)
     except (OSError, ValueError) as err:
         # Refused rather than falling back to the defaults: a config file that
         # does not load would otherwise leave a list the operator thinks they
@@ -1832,6 +2246,7 @@ def main(argv):
     sys.stderr.write("junie-ide-relayd: listening on 127.0.0.1:%d, instances %s\n"
                      % (args.port, instances_dir))
     report_allow(allow_state.patterns, allow_state.source)
+    report_allow_rpc(allow_state.methods, allow_state.rpc_source)
     install_reload_handler(allow_state)
 
     while True:

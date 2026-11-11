@@ -185,6 +185,68 @@ notice. The same relay carries it:
   `*`) overrides the file, and `--no-tool-filter` relays unfiltered. `SIGHUP` re-reads it, so a
   change needs no restart; see [the host steps](../README.md#connecting-to-an-ide-on-the-host).
 
+#### The path gate
+
+An allowlisted tool is not limited by the allowlist to the project: the project directory is shared
+with the host writable, so a symlink in it names any host path the IDE user can read. The IDE's own
+containment check compares the path it was handed rather than where that path lands, so
+`ln -s ~/.ssh .p-ssh` in the project turns `read_file <project>/.p-ssh/id_ed25519` into a host read,
+and `create_new_file` and `apply_patch` become host writes. The relay daemon resolves each path
+argument itself, on the host, which is the only process that resolves it the way the IDE will.
+
+- Every path a call names is resolved with `realpath` and compared against the project the digest
+  resolves to. An argument that lands outside it is refused by the daemon, with `-32602` and the
+  parameter named, so the IDE is never asked to run the call.
+- A relative path resolves against the project root, as the IDE resolves it. A path that does not
+  exist yet has its existing components resolved, so `create_new_file` still works inside the
+  project while creation through a symlinked directory does not.
+- An in-project symlink whose target is also in the project keeps working, which is what
+  `node_modules/.bin` needs: the gate judges where a path lands, not whether it is a link.
+- `apply_patch` declares only `projectPath`, so its targets are read out of the patch body: the
+  `*** Add File:` / `*** Update File:` / `*** Delete File:` headers and the unified-diff
+  `--- a/…` / `+++ b/…` form. One escaping target refuses the whole call, since a patch cannot drop
+  a file and keep the rest. A body the parser cannot read is refused rather than forwarded.
+- `execute_tool` names its target in its own argument, so the command is parsed and the target's
+  path parameter checked: a first-word check cannot say which path the call will touch.
+- A call naming a path this filter cannot resolve — a number, an object, a patch body that will not
+  parse — is refused rather than forwarded, and so is a call arriving in a shape the schema does not
+  describe. A digest that resolves to no project relays nothing anyway, so the gate is skipped
+  there rather than refusing everything.
+
+The table of which parameter each tool carries a path in lives beside the allowlist in
+`bin/junie-ide-relayd`. `tests/test_relayd.py` fails when a tool whose schema has a path-like
+parameter is missing from it, so a tool a later IDE build adds stops the suite rather than the gate.
+
+### RPC methods
+
+The RPC channel is the plugin's own call surface, separate from the MCP server above, and it is
+filtered the same way. `initialize` advertises 15 services with 51 methods between them, not the
+one method the daemon itself calls, and the CLI drives most of them.
+
+- A method the allowlist does not name is answered by the daemon with `-32601` and never reaches
+  the plugin. `JunieEditService.applyPatch` is the reason: it is a project write that carries its
+  own paths, so it bypasses both the tool allowlist and the path gate, and a project symlink
+  reaches the host through it exactly as it does through `read_file`. The same is true of every
+  build, run, test, refactor and navigation method, so none of them is named.
+- `initialize` is allowed, and is not an optional extra. It is the handshake that returns the
+  service list, the project id and the protocol version, and the CLI calls it once per
+  connection: refusing it does not narrow the channel, it breaks the connection. The project id
+  it returns is what every other method needs, which is also why the sandbox could reach those
+  methods at all.
+- What is named reads state and cannot write the project or name a host path: the MCP credentials
+  call, the product name and quota, the consent and guidelines calls, the IDE log directory, the
+  editor context, `markDirty`/`markDirtyAll`, and the session history.
+- The list lives in the same config file, as `allow_rpc = ["JunieSystemService.getProductName"]`,
+  with `--allow-rpc METHOD` overriding it and `--no-rpc-filter` relaying unfiltered. `SIGHUP`
+  re-reads both lists. A method a later plugin adds is not named, so it is refused until someone
+  reviews it.
+- The daemon reports both lists at startup, and on a reload, so an operator can see which gates are
+  in force without reading the config file.
+
+A method refused here is not an error in the sandbox: the CLI reports an IDE method it cannot reach
+the same way it reports one the plugin does not implement, since `-32601` is what the plugin
+answers an unknown method with.
+
 Starting the daemon, running the sandbox, and checking `/ide` are in the
 [root README](../README.md#connecting-to-an-ide-on-the-host).
 

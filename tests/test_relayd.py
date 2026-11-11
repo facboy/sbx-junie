@@ -5,6 +5,7 @@ import http.server
 import io
 import json
 import os
+import pathlib
 import shutil
 import socket
 import tempfile
@@ -77,7 +78,7 @@ class Reader:
 class SpliceSession:
     """One MCP exchange over socket pairs, with a fake IDE on the far side."""
 
-    def __init__(self, allow=ALLOW):
+    def __init__(self, allow=ALLOW, root=None, methods=None):
         self.relay_client, self.client = socket.socketpair()
         self.relay_upstream, self.ide = socket.socketpair()
         for sock in (self.client, self.ide):
@@ -86,7 +87,7 @@ class SpliceSession:
         self.ide_reader = Reader(self.ide)
         self.thread = threading.Thread(
             target=relayd.splice_mcp,
-            args=(self.relay_client, self.relay_upstream, allow),
+            args=(self.relay_client, self.relay_upstream, allow, root, methods),
             daemon=True)
         self.thread.start()
 
@@ -769,5 +770,381 @@ class ExitStatusTest(unittest.TestCase):
         self.assertEqual(self.start(), 1)
 
 
+def rpc_call(method):
+    """A JSON-RPC request naming `method`, as the RPC channel's body."""
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                       "params": {}}).encode()
+
+
+def path_call(name, **arguments):
+    """A `tools/call` naming `name` with `arguments`, as its body."""
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}}).encode()
+
+
+# The gate is reached only by a tool the allowlist already covers, so these tests
+# allow every tool they drive and let the path argument be what is refused.
+GATE_ALLOW = ("*",)
+
+
+class PathGateTest(unittest.TestCase):
+    """A path argument that resolves outside the project never reaches the IDE.
+
+    The project is agent-writable, so a symlink in it is the way out: the IDE's
+    containment check compares the name it was handed, and the daemon resolves
+    where that name lands before forwarding the call.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = pathlib.Path(self.tmp.name)
+        self.project = base / "project"
+        (self.project / "src").mkdir(parents=True)
+        (self.project / "src" / "inside.py").write_text("x = 1\n")
+        self.outside = base / "outside"
+        self.outside.mkdir()
+        (self.outside / "secret").write_text("host-only\n")
+        # The escape itself: a project entry naming a directory outside it.
+        (self.project / "escape").symlink_to(self.outside)
+        # An in-project symlink that stays in the project, as node_modules/.bin
+        # does, which has to keep working.
+        (self.project / "alias").symlink_to(self.project / "src")
+
+    def session(self):
+        session = SpliceSession(GATE_ALLOW, str(self.project))
+        self.addCleanup(session.close)
+        return session
+
+    def assert_refused(self, session, argument):
+        refusal = session.reply_to_client()
+        self.assertEqual(refusal["error"]["code"], -32602)
+        self.assertIn(argument, refusal["error"]["message"])
+        self.assertTrue(session.ide_is_silent())
+
+    def test_a_path_inside_the_project_is_forwarded(self):
+        session = self.session()
+        raw = session.send(path_call("read_file", file_path=str(self.project / "src")))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_a_relative_path_inside_the_project_is_forwarded(self):
+        session = self.session()
+        raw = session.send(path_call("read_file", file_path="src/inside.py"))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_a_project_symlink_to_an_outside_directory_is_refused(self):
+        session = self.session()
+        session.send(path_call("read_file", file_path=str(self.project / "escape")
+                               + "/secret"))
+        self.assert_refused(session, "file_path")
+
+    def test_a_plain_outside_path_is_refused(self):
+        session = self.session()
+        session.send(path_call("read_file", file_path=str(self.outside / "secret")))
+        self.assert_refused(session, "file_path")
+
+    def test_a_traversing_path_is_refused(self):
+        session = self.session()
+        session.send(path_call("read_file", file_path="../../etc/passwd"))
+        self.assert_refused(session, "file_path")
+
+    def test_an_in_project_symlink_still_works(self):
+        session = self.session()
+        raw = session.send(path_call("read_file", file_path=str(self.project / "alias")))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_each_gated_tool_is_checked(self):
+        for tool, argument in (("list_directory_tree", "directoryPath"),
+                               ("create_new_file", "pathInProject"),
+                               ("open_file_in_editor", "filePath"),
+                               ("search_text", "paths")):
+            with self.subTest(tool=tool):
+                session = self.session()
+                session.send(path_call(tool, **{argument: str(self.project / "escape")}))
+                self.assert_refused(session, argument)
+
+    def test_a_list_of_paths_is_each_checked(self):
+        session = self.session()
+        session.send(path_call("search_text", paths=[str(self.project / "src"),
+                                                     str(self.outside)]))
+        self.assert_refused(session, "paths")
+
+    def test_a_non_string_path_is_refused_rather_than_forwarded(self):
+        session = self.session()
+        session.send(path_call("read_file", file_path={"nested": "value"}))
+        self.assert_refused(session, "file_path")
+
+    def test_an_omitted_optional_path_is_forwarded(self):
+        session = self.session()
+        raw = session.send(path_call("get_run_configurations"))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_a_dispatcher_call_naming_an_escaping_path_is_refused(self):
+        session = self.session()
+        session.send(path_call(
+            "execute_tool",
+            command="read_file --file_path %s" % (self.project / "escape" / "secret")))
+        self.assert_refused(session, "file_path")
+
+    def test_a_dispatcher_call_naming_an_inside_path_is_forwarded(self):
+        session = self.session()
+        raw = session.send(path_call(
+            "execute_tool",
+            command="read_file --file_path %s" % (self.project / "src")))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_an_escaping_call_in_a_batch_is_refused_whole(self):
+        session = self.session()
+        batch = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "read_file",
+                             "arguments": {"file_path": str(self.outside)}}}]
+        session.send(json.dumps(batch).encode())
+        refusal = session.reply_to_client()
+        self.assertEqual(refusal[0]["error"]["code"], -32602)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_the_gate_is_skipped_when_no_project_resolves(self):
+        session = SpliceSession(GATE_ALLOW, None)
+        self.addCleanup(session.close)
+        raw = session.send(path_call("read_file", file_path=str(self.outside)))
+        self.assertEqual(session.forwarded(), raw)
+
+
+class PatchGateTest(unittest.TestCase):
+    """A patch whose body names a path outside the project never reaches the IDE.
+
+    `apply_patch` declares only `projectPath`, so the only place its targets show
+    is the body: a gate that trusted the schema would forward a patch adding
+    `../../.ssh/authorized_keys`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = pathlib.Path(self.tmp.name)
+        self.project = base / "project"
+        (self.project / "src").mkdir(parents=True)
+        self.outside = base / "outside"
+        self.outside.mkdir()
+
+    def session(self):
+        session = SpliceSession(GATE_ALLOW, str(self.project))
+        self.addCleanup(session.close)
+        return session
+
+    def assert_refused(self, session):
+        refusal = session.reply_to_client()
+        self.assertEqual(refusal["error"]["code"], -32602)
+        self.assertTrue(session.ide_is_silent())
+        return refusal
+
+    def test_an_apply_patch_body_inside_the_project_is_forwarded(self):
+        body = ("*** Begin Patch\n*** Add File: src/new.py\n+x = 1\n"
+                "*** End Patch")
+        session = self.session()
+        raw = session.send(path_call("apply_patch", input=body))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_an_apply_patch_body_that_adds_an_outside_file_is_refused(self):
+        body = ("*** Begin Patch\n*** Add File: ../escape.txt\n+x\n"
+                "*** End Patch")
+        session = self.session()
+        session.send(path_call("apply_patch", input=body))
+        self.assertIn("escape.txt", self.assert_refused(session)["error"]["message"])
+
+    def test_an_apply_patch_body_that_deletes_an_outside_file_is_refused(self):
+        body = ("*** Begin Patch\n*** Delete File: %s\n*** End Patch"
+                % (self.outside / "gone.txt"))
+        session = self.session()
+        session.send(path_call("apply_patch", input=body))
+        self.assert_refused(session)
+
+    def test_a_unified_diff_that_touches_an_outside_file_is_refused(self):
+        body = ("--- a/%s/x.txt\n+++ b/%s/x.txt\n@@ -0,0 +1 @@\n+x\n"
+                % (self.outside, self.outside))
+        session = self.session()
+        session.send(path_call("apply_patch", input=body))
+        self.assert_refused(session)
+
+    def test_a_unified_diff_inside_the_project_is_forwarded(self):
+        body = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+        session = self.session()
+        raw = session.send(path_call("apply_patch", patch=body))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_a_multi_file_patch_with_one_escaping_target_is_refused_whole(self):
+        body = ("*** Begin Patch\n*** Add File: src/ok.py\n+x\n"
+                "*** Add File: ../escape.txt\n+y\n*** End Patch")
+        session = self.session()
+        session.send(path_call("apply_patch", input=body))
+        # One escaping target refuses the call, so the inside one is not run.
+        self.assert_refused(session)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_a_patch_whose_header_names_no_path_is_refused(self):
+        body = "*** Begin Patch\n*** Add File:\n+x\n*** End Patch"
+        session = self.session()
+        session.send(path_call("apply_patch", input=body))
+        self.assertIn(relayd.PATCH_UNREADABLE,
+                      self.assert_refused(session)["error"]["message"])
+
+    def test_a_patch_through_the_dispatcher_is_gated_too(self):
+        body = "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch"
+        session = self.session()
+        session.send(path_call("execute_tool",
+                               command='apply_patch --input %s' % json.dumps(body)))
+        self.assert_refused(session)
+
+    def test_a_patch_naming_no_file_is_forwarded(self):
+        # Nothing to resolve is not the same as something that escapes: the IDE
+        # answers an empty patch itself.
+        session = self.session()
+        raw = session.send(path_call("apply_patch", input="*** Begin Patch\n*** End Patch"))
+        self.assertEqual(session.forwarded(), raw)
+
+
+class RpcAllowTest(unittest.TestCase):
+    """The RPC channel refuses a method the allowlist does not name.
+
+    The channel is JSON-RPC over HTTP like the MCP one, but it carries no tool
+    names: the method is the whole surface, and `JunieEditService.applyPatch` is a
+    project write that no tool-level gate reaches.
+    """
+
+    def session(self, methods=relayd.DEFAULT_ALLOW_RPC):
+        session = SpliceSession(None, None, methods)
+        self.addCleanup(session.close)
+        return session
+
+    def test_an_allowlisted_method_is_forwarded(self):
+        session = self.session()
+        raw = session.send(rpc_call("JunieMcpService.getBuiltInMcpServerCredentials"))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_the_initialize_handshake_is_forwarded(self):
+        # It returns the service list, the project id and the protocol version,
+        # and the CLI calls it once per connection: refusing it breaks the
+        # channel rather than narrowing it.
+        session = self.session()
+        raw = session.send(rpc_call("initialize"))
+        self.assertEqual(session.forwarded(), raw)
+
+    def test_apply_patch_is_refused_and_never_forwarded(self):
+        session = self.session()
+        session.send(rpc_call("JunieEditService.applyPatch"))
+        refusal = session.reply_to_client()
+        self.assertEqual(refusal["error"]["code"], -32601)
+        self.assertIn("JunieEditService.applyPatch", refusal["error"]["message"])
+        self.assertTrue(session.ide_is_silent())
+
+    def test_an_unknown_method_is_refused(self):
+        session = self.session()
+        session.send(rpc_call("JunieUnknownService.noSuchMethod"))
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_a_refused_method_in_a_batch_is_refused_whole(self):
+        session = self.session()
+        batch = [{"jsonrpc": "2.0", "id": 1,
+                  "method": "JunieMcpService.getBuiltInMcpServerCredentials"},
+                 {"jsonrpc": "2.0", "id": 2, "method": "JunieBuildService.buildProject"}]
+        session.send(json.dumps(batch).encode())
+        refusal = session.reply_to_client()
+        self.assertEqual(refusal[0]["error"]["code"], -32601)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_a_request_naming_no_method_is_refused(self):
+        session = self.session()
+        session.send(json.dumps({"jsonrpc": "2.0", "id": 1}).encode())
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_the_method_failure_builds_a_valid_body(self):
+        # The method is whatever the client sent, so a quote in it must not break
+        # the body the CLI has to parse.
+        session = self.session()
+        session.send(rpc_call('Junie"EditService.applyPatch'))
+        self.assertIn("is not available",
+                      session.reply_to_client()["error"]["message"])
+
+    def test_a_chunked_request_is_filtered_too(self):
+        session = self.session()
+        session.send(rpc_call("JunieEditService.applyPatch"), chunked=True)
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+        self.assertTrue(session.ide_is_silent())
+
+    def test_an_empty_allowlist_refuses_every_method(self):
+        session = self.session(methods=())
+        session.send(rpc_call("JunieMcpService.getBuiltInMcpServerCredentials"))
+        self.assertEqual(session.reply_to_client()["error"]["code"], -32601)
+        self.assertTrue(session.ide_is_silent())
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# The `tools/list` surface the path gate is drawn against, as the property names
+# each tool carries. Pinned rather than fetched, so a tool a later IDE build adds
+# is a decision here rather than a silent gap in the gate.
+PATH_TOOL_SURFACE = {
+    "read_file": {"file_path"},
+    "create_new_file": {"pathInProject"},
+    "list_directory_tree": {"directoryPath"},
+    "open_file_in_editor": {"filePath"},
+    "get_file_problems": {"filePath"},
+    "get_symbol_info": {"filePath"},
+    "get_python_environment": {"filePath"},
+    "get_run_configurations": {"filePath"},
+    "analyze_calls": {"treePath"},
+    "search_file": {"paths"},
+    "search_regex": {"paths"},
+    "search_symbol": {"paths"},
+    "search_text": {"paths"},
+    "rename_refactoring": {"pathInProject"},
+    "create_notebook": {"file_path"},
+    "read_notebook": {"file_path"},
+    "read_notebook_cell": {"file_path"},
+    "edit_notebook": {"file_path"},
+    "get_notebook_state": {"file_path"},
+    "git_status": {"repositoryPathRelativeToProject"},
+}
+# `apply_patch` carries its targets in a body, so it is gated by `patch_paths`.
+# Every other tool on the surface names no path but `projectPath`, which is the
+# project itself and needs no check.
+BODY_GATED_TOOLS = {"apply_patch"}
+PROJECT_PATH_ONLY = {
+    "execute_tool", "cancel_sql_query", "create_database_connection",
+    "edit_database_connection", "fetch_query_result", "get_database_object_description",
+    "introspect_schema", "list_database_connections", "list_database_schemas",
+    "list_recent_sql_queries", "list_schema_object_kinds", "list_schema_objects",
+    "preview_table_data", "test_database_connection", "list_data_extractors",
+    "get_project_dependencies", "get_project_modules", "get_all_open_file_paths",
+    "get_repositories", "create_changelist", "get_changelists",
+}
+
+
+class ToolCoverageTest(unittest.TestCase):
+    """Every tool that carries a path is either gated or explicitly exempt.
+
+    A tool the map misses passes ungated, so the omission has to fail here rather
+    than in production.
+    """
+
+    def test_every_path_bearing_tool_is_gated(self):
+        for tool, parameters in PATH_TOOL_SURFACE.items():
+            with self.subTest(tool=tool):
+                self.assertIn(tool, relayd.TOOL_PATH_ARGS)
+                self.assertEqual(set(relayd.TOOL_PATH_ARGS[tool]), parameters)
+
+    def test_the_mapped_tools_are_the_ones_the_surface_names(self):
+        self.assertEqual(set(relayd.TOOL_PATH_ARGS), set(PATH_TOOL_SURFACE))
+
+    def test_a_tool_with_no_path_parameter_is_not_mapped(self):
+        overlap = set(relayd.TOOL_PATH_ARGS) & PROJECT_PATH_ONLY
+        self.assertEqual(set(), overlap)
+
+    def test_a_body_gated_tool_is_not_also_mapped_by_parameter(self):
+        self.assertEqual(set(), set(relayd.TOOL_PATH_ARGS) & BODY_GATED_TOOLS)
+        self.assertIn(relayd.PATCH_TOOL, BODY_GATED_TOOLS)
