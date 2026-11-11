@@ -230,6 +230,20 @@ REAP_TIMEOUT = 60
 # the only way to reach this; past it the session ends rather than growing the
 # queue for as long as the stream lasts.
 OWED_LIMIT = 1024
+# The `PairHello` sent to a plugin's pair socket: who is asking, and what for. The
+# plugin records both and answers with a token; neither is checked against a list.
+PAIR_CLIENT = "junie-ide-relayd"
+PAIR_CLIENT_VERSION = "1"
+# How long to wait for a plugin to answer a `PairHello` on its pair socket. The
+# socket is local and answers at once, so a delay that long means it is not
+# serving, which is the same as a plugin that will not pair.
+PAIR_TIMEOUT = 5
+# Tokens obtained over pair sockets, keyed by the socket path and its mtime. The
+# plugin hands out one token per session it accepts, so a cached token is reused
+# only while that socket is the same file it was read from: an IDE restart
+# replaces the socket, and the token issued by the old one is not its.
+PAIR_TOKENS = {}
+PAIR_TOKENS_LOCK = threading.Lock()
 
 
 def resolve_instances(explicit):
@@ -613,6 +627,57 @@ def split_digest_secret(payload):
     return digest.decode("ascii"), secret
 
 
+def pair_token(path):
+    """A session token the plugin at `path` issues, or None.
+
+    Schema 3 stopped writing `rpc_token` into the instance file: the CLI dials the
+    pair socket and asks for one. This daemon makes the same call, so the MCP port
+    below stays resolvable on a plugin that no longer publishes a token.
+
+    Cached by the socket's path and mtime, since the plugin issues a token per
+    session and the socket is replaced when the IDE restarts: a token from the
+    socket that used to be there is not one the new plugin knows.
+    """
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+    key = (path, stamp)
+    with PAIR_TOKENS_LOCK:
+        cached = PAIR_TOKENS.get(key)
+    if cached:
+        return cached
+    hello = json.dumps({"client": PAIR_CLIENT,
+                        "client_version": PAIR_CLIENT_VERSION})
+    token = None
+    try:
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            conn.settimeout(PAIR_TIMEOUT)
+            conn.connect(path)
+            conn.sendall((hello + "\n").encode())
+            conn.settimeout(PAIR_TIMEOUT)
+            line = b""
+            while b"\n" not in line and len(line) < MAX_PREAMBLE:
+                chunk = conn.recv(1)
+                if not chunk:
+                    break
+                line += chunk
+        finally:
+            conn.close()
+        reply = json.loads(line.decode("utf-8", "replace"))
+        if reply.get("status") == "allowed":
+            value = reply.get("token")
+            if isinstance(value, str) and value:
+                token = value
+    except Exception:
+        return None
+    if token is not None:
+        with PAIR_TOKENS_LOCK:
+            PAIR_TOKENS[key] = token
+    return token
+
+
 def mcp_port_for_digest(instances_dir, digest):
     """Resolve the loopback port the IDE named by `digest` serves its MCP on.
 
@@ -639,7 +704,12 @@ def mcp_port_for_digest(instances_dir, digest):
         return "gone", None
     rpc_port, info = resolved
     token = info.get("rpc_token")
-    if not isinstance(token, str):
+    if not isinstance(token, str) or not token:
+        # Schema 3 replaced the file's token with the pair socket, which issues
+        # one to whoever asks. Without either, the call below cannot authenticate.
+        pair = info.get("pair_socket")
+        token = pair_token(pair) if isinstance(pair, str) and pair else None
+    if not token:
         return "unknown", None
     body = json.dumps({
         "jsonrpc": "2.0",

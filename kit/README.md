@@ -122,10 +122,12 @@ loopback, where nothing listens — so that server reports as failed and Junie r
 notice. The same relay carries it:
 
 - The daemon resolves the port by asking the plugin, over the IDE's RPC, the same
-  `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. `JUNIE-RELAY 1 mcp <digest>
-  <secret>` splices to the server; `JUNIE-RELAY 1 mcp-port <digest> <secret>` answers with the port,
-  `none` when the plugin names no built-in server, `gone` when the IDE behind the digest is not
-  running, or `unknown` when the plugin did not answer.
+  `JunieMcpService.getBuiltInMcpServerCredentials` call the CLI makes. That call authenticates with
+  a session token, which schema 3 stopped writing into the instance file: when the file names no
+  `rpc_token`, the daemon asks the pair socket above for one, as the CLI does. `JUNIE-RELAY 1 mcp
+  <digest> <secret>` splices to the server; `JUNIE-RELAY 1 mcp-port <digest> <secret>` answers with
+  the port, `none` when the plugin names no built-in server, `gone` when the IDE behind the digest is
+  not running, or `unknown` when the plugin did not answer.
 - `junie-ide-relay.sh` asks for that port on every pass and starts an endpoint bound to it, marked
   `--mcp` so its preamble names the server rather than the RPC. The endpoint owns the port outright,
   on `127.0.0.1` and `::1` alike: `localhost` resolves to the IPv6 loopback first, and a listener on

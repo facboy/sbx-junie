@@ -1,6 +1,7 @@
 """Tests for the relay daemon's parsers, its tool allowlist and its exit status."""
 import contextlib
 import hashlib
+import http.server
 import io
 import json
 import os
@@ -632,6 +633,96 @@ class PairBridgeTest(unittest.TestCase):
         self.assertEqual(client.recv(4096), b"")
         with self.assertRaises(socket.timeout):
             listener.accept()
+
+
+class PairTokenTest(unittest.TestCase):
+    """The MCP port is resolved on a plugin that publishes no token in its file.
+
+    Schema 3 moved the token out of the instance file and onto the pair socket, so
+    a daemon reading only `rpc_token` cannot authenticate the credentials call and
+    answers `unknown`. The mirror then never starts, and the CLI reports an MCP
+    setup failure.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.instances = os.path.join(self.root, "instances")
+        os.mkdir(self.instances)
+        self.project = os.path.join(self.root, "project")
+        self.digest = hashlib.md5(self.project.encode()).hexdigest()
+
+        # A plugin that issues a token over its pair socket.
+        self.pair = os.path.join(self.root, "pair.sock")
+        self.plugin = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.plugin.bind(self.pair)
+        self.plugin.listen(8)
+        self.addCleanup(self.plugin.close)
+        threading.Thread(target=self.serve_pair, daemon=True).start()
+
+        # The IDE's RPC, which the credentials call authenticates against.
+        self.requests = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("content-length", 0))
+                body = json.loads(self.rfile.read(length))
+                requests.append((self.headers.get("Authorization"), body))
+                result = ({"port": 54321} if self.headers.get("Authorization") == "tok-abc"
+                          else {"error": "unauthorized"})
+                out = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *_args):
+                pass
+
+        requests = self.requests
+        self.rpc = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(self.rpc.server_close)
+        threading.Thread(target=self.rpc.serve_forever, daemon=True).start()
+
+    def serve_pair(self):
+        while True:
+            try:
+                conn, _ = self.plugin.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)
+                conn.sendall(b'{"status":"allowed","token":"tok-abc"}\n')
+            finally:
+                conn.close()
+
+    def publish(self, **fields):
+        info = {"schema_version": 3, "project_path": self.project,
+                "pid": 1, "port": self.rpc.server_address[1]}
+        info.update(fields)
+        with open(os.path.join(self.instances, "%s_%d.json" % (self.digest, info["pid"])), "w") as handle:
+            json.dump(info, handle)
+
+    def test_a_schema_3_file_resolves_the_port_over_the_pair_socket(self):
+        relayd.PAIR_TOKENS.clear()
+        self.publish(pair_socket=self.pair)
+        self.assertEqual(relayd.mcp_port_for_digest(self.instances, self.digest),
+                         ("port", 54321))
+        self.assertEqual(self.requests[0][0], "tok-abc")
+        self.assertEqual(self.requests[0][1]["method"], relayd.MCP_CREDENTIALS_METHOD)
+
+    def test_a_file_token_still_resolves_the_port(self):
+        # Schema 2 and below publish the token itself, and that still works.
+        relayd.PAIR_TOKENS.clear()
+        self.publish(schema_version=2, rpc_token="tok-abc")
+        self.assertEqual(relayd.mcp_port_for_digest(self.instances, self.digest),
+                         ("port", 54321))
+
+    def test_a_plugin_that_issues_no_token_leaves_the_port_unknown(self):
+        relayd.PAIR_TOKENS.clear()
+        self.publish(pair_socket=os.path.join(self.root, "absent.sock"))
+        self.assertEqual(relayd.mcp_port_for_digest(self.instances, self.digest),
+                         ("unknown", None))
 
 
 class ExitStatusTest(unittest.TestCase):
