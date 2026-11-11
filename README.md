@@ -266,8 +266,9 @@ that it is listening with `systemctl --user status junie-ide-relayd` —
 `listening on 127.0.0.1:27183` in its log is what the sandbox-side relay needs.
 
 `~/.junie/instances` may be empty on a host that has never opened a project in a JetBrains IDE with
-the Junie plugin installed: the directory exists only once the plugin has run. The relay is a no-op
-until it does.
+JetBrains AI Assistant installed: the directory exists only once that plugin has run. Junie ships
+inside it rather than as a plugin of its own, so searching the IDE's plugin list for "Junie" finds
+nothing. The relay is a no-op until the directory is populated.
 
 Then start the sandbox and check the connection from inside:
 
@@ -275,8 +276,8 @@ Then start the sandbox and check the connection from inside:
 > /ide
 ```
 
-A `Connected` state names the IDE, its project, and the plugin version. `Missing` means the Junie
-plugin is not installed in the IDE you have open; `Unsupported` means the IDE is older than
+A `Connected` state names the IDE, its project, and the plugin version. `Missing` means JetBrains AI
+Assistant is not installed in the IDE you have open; `Unsupported` means the IDE is older than
 `2026.1`, which is Junie's floor for this integration (see upstream's
 [JetBrains IDE integration](https://junie.jetbrains.com/docs/junie-cli-jetbrains-ide-integration.html)).
 `AuthRequired`, shown as `Unauthorized`, means the plugin refused the token in the instance file the

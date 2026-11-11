@@ -35,10 +35,11 @@ image, and so lack the host-install model and the IDE relay below.
 
 ## Relay architecture
 
-Junie reaches an IDE through `~/.junie/instances/*.json` — a file the IDE's Junie plugin writes,
-holding the project it has open and the loopback port it listens on. The CLI then dials
-`127.0.0.1:<port>`, which inside a sandbox is the sandbox's own loopback where no IDE runs, so the
-kit bridges the two with a pair of relays.
+Junie reaches an IDE through `~/.junie/instances/*.json` — a file JetBrains AI Assistant writes,
+holding the project it has open and the loopback port it listens on. Junie ships inside that plugin
+rather than as one of its own, and the CLI resolves it by marketplace ID 26104, so the IDE's plugin
+list holds nothing named "Junie". The CLI then dials `127.0.0.1:<port>`, which inside a sandbox is
+the sandbox's own loopback where no IDE runs, so the kit bridges the two with a pair of relays.
 
 That directory does not follow `JUNIE_HOME`: the CLI resolves it from the `junie.instances.dir`
 system property if set, and otherwise from `user.home` (a JVM property, not `$HOME`), never from
@@ -100,7 +101,7 @@ reports as `AuthRequired`/`Unauthorized`.
 
 ### The plugin's pair socket
 
-An instance file from plugin schema 3 on carries no token. It names a `pair_socket` instead — a Unix
+An instance file from schema 3 on carries no token. It names a `pair_socket` instead — a Unix
 domain socket the plugin listens on — and the CLI dials it, sends a `PairHello`, and takes the
 session token from the `PairReply`. That path is on the host, so the file published into the sandbox
 would name a socket nothing there can dial, which the CLI reports as `Pairing failed: No such file or
@@ -111,7 +112,7 @@ The same relay carries it. `junie-ide-relay.sh` binds a socket of its own for th
 directory is longer than that, and publishes that path in the instance file in place of the host's.
 Its endpoint is started with `--unix PATH --pair`, so each connection opens with
 `JUNIE-RELAY 1 pair <digest> <secret>`; the daemon resolves the digest to the host `pair_socket` and
-splices the two. A plugin below schema 3 publishes no `pair_socket`, and the file's `rpc_token` is
+splices the two. A plugin below that schema publishes no `pair_socket`, and the file's `rpc_token` is
 then published unchanged, which is what the CLI falls back to.
 
 ### The IDE's built-in MCP server
