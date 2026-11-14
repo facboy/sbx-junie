@@ -44,6 +44,16 @@ daemon, since a sandbox that already exists keeps the agent it was started with.
 `sbx settings set ssh.agentForwardingEnabled true` that turns the setting back on for every
 sandbox the daemon serves; `JUNIE_SBX_KEEP_SSH_AGENT=1` skips the step.
 
+It also turns clipboard text copy on, so a copy made in a sandbox reaches your clipboard. A sandbox
+has no X or Wayland server, so the runtime supplies `wl-copy`, `xclip` and `xsel` as shims that
+post the text to the host bridge: a distro package of any of them would find no display, and
+`/usr/local/bin` comes first on `PATH`, so the shim is the one that runs. The host gates the
+write, and with `clipboard.textCopy` off the bridge answers `403` and Junie reports that the copy
+failed, hinting at those packages even though the tool it ran is present. The step runs only while
+`sbx` reports the setting off, and prints `sbx settings set clipboard.textCopy false`;
+`JUNIE_SBX_NO_CLIPBOARD=1` skips it. Reads are not gated, so a sandbox pastes from your clipboard
+already.
+
 `junie-sbx.sh` sets up each project's Junie home at the start of every run — the three read-only
 links and this project's host sessions — without prompting, so it works unattended and a session
 recorded after the first run is picked up by the next. Only the sessions `~/.junie/sessions/index.jsonl`
@@ -368,8 +378,9 @@ The sandbox's watcher picks the work up within a tick, without restarting the sa
 ## Tests
 
 The daemon's parsers and allowlist, the byte splice both relay halves carry, the endpoint's
-bind, the terminal filter's splitting, and `junie-sbx.sh`'s handling of `mounts` entries are
-covered by `tests/`, which needs nothing beyond `python3`:
+bind, the terminal filter's splitting, `junie-sbx.sh`'s handling of `mounts` entries, and
+`setup-junie-sbx.sh`'s clipboard step are covered by `tests/`, which needs nothing beyond
+`python3`:
 
 ```console
 python3 -B -m unittest discover -s tests

@@ -67,3 +67,26 @@ if [ "${JUNIE_SBX_KEEP_SSH_AGENT:-}" != 1 ] && command -v sbx > /dev/null 2>&1; 
     fi
   fi
 fi
+
+# A sandbox has no X or Wayland server, so the runtime puts wl-copy, xclip and
+# xsel on its PATH as shims that post the text to the host bridge; a real tool
+# from a distro package could reach no display, and /usr/local/bin precedes
+# /usr/bin anyway, so it would be shadowed by the shim. The write is therefore a
+# write to your host clipboard, and the host gates it. Left off, Junie's copy
+# fails and the hint it shows -- "Install wl-clipboard, xclip, or xsel" -- names
+# a cause that is not the one in play, since the tool it ran is present. Reads
+# are open either way, so a sandbox can already paste from your clipboard.
+# JUNIE_SBX_NO_CLIPBOARD=1 leaves the setting alone.
+if [ "${JUNIE_SBX_NO_CLIPBOARD:-}" != 1 ] && command -v sbx > /dev/null 2>&1; then
+  if [ "$(sbx settings get clipboard.textCopy 2> /dev/null)" != true ]; then
+    if sbx settings set clipboard.textCopy true > /dev/null 2>&1; then
+      echo "junie-sbx: enabling clipboard text copy, so a copy made in a sandbox" >&2
+      echo "  reaches this host's clipboard. Turn it back off with:" >&2
+      echo "    sbx settings set clipboard.textCopy false" >&2
+    else
+      echo "junie-sbx: could not enable clipboard text copy; a copy made in a" >&2
+      echo "  sandbox stays off until it is:" >&2
+      echo "    sbx settings set clipboard.textCopy true" >&2
+    fi
+  fi
+fi
